@@ -1,0 +1,331 @@
+# ContractX - FastAPI Document Analysis System
+
+A comprehensive document analysis system that extracts structured information from PDF and DOC files using advanced AI models, with a special focus on robust table detection and extraction.
+
+## 🎯 Features
+
+- **Multi-Format Support**: PDF and DOCX document processing
+- **Intelligent Chunking**: Configurable chunk size with overlap for context preservation
+- **Dual Table Detection**: 
+  - Text-based detection using Gemini 2.0 Flash Experimental
+  - Visual detection using Microsoft's Table Transformer model
+  - Conflict resolution with high accuracy
+- **Structure Extraction**: Headings, sub-headings, clauses, and sub-clauses from TEXT ONLY
+- **Entity Recognition**: Buyer/seller names, dates, deadlines, alerts, addresses (from text, not tables)
+- **Complete Table Extraction**: No data loss with validation at multiple stages
+- **Advanced Rate Limiting**: Built-in quota management for free-tier API usage
+- **Retry Logic**: Automatic retry with exponential backoff for failed requests
+- **Comprehensive Logging**: Detailed logs for debugging and monitoring
+
+## 🆕 NEW: Smart Text vs Table Separation
+
+The system now intelligently separates text content from table content:
+- **Text LLM**: Analyzes ONLY plain text, paragraphs, and clauses (skips table content)
+- **Table Detection**: Identifies table presence and location
+- **Table LLM**: Extracts complete table structure with all cells, rows, and columns
+
+This ensures no content duplication and accurate extraction!
+
+## 🔥 NEW: Rate Limiting & Quota Management
+
+Built specifically for **Gemini free tier** with smart quota handling:
+- Configurable delays between requests
+- Automatic detection of quota/rate limit errors
+- Exponential backoff retry logic
+- Pauses and resumes processing automatically
+- Failed chunks are automatically retried
+
+## 📁 Project Structure
+
+```
+contractx/
+├── main.py                          # FastAPI application entry point
+├── config.py                        # Configuration management
+├── models/
+│   └── schemas.py                   # Pydantic data models
+├── services/
+│   ├── document_processor.py        # PDF/DOCX to pages conversion
+│   ├── chunking_service.py          # Document chunking with overlap
+│   ├── text_llm_service.py          # Gemini text analysis (TEXT ONLY)
+│   ├── table_detection_service.py   # HuggingFace table detection
+│   ├── table_llm_service.py         # Gemini table structure extraction
+│   └── merger_service.py            # Result aggregation and conflict resolution
+├── utils/
+│   └── file_handler.py              # File upload and management
+├── uploads/                         # Temporary file storage
+├── logs/                            # Detailed processing logs
+├── requirements.txt                 # Python dependencies
+├── .env.example                     # Environment variables template
+└── README.md                        # This file
+```
+
+## 🚀 Installation
+
+### 1. Clone the Repository
+
+```bash
+git clone <repository-url>
+cd contractx
+```
+
+### 2. Create Virtual Environment
+
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure Environment
+
+```bash
+cp .env.example .env
+# Edit .env and add your GEMINI_API_KEY
+```
+
+### 5. Get Gemini API Key
+
+1. Go to [Google AI Studio](https://makersuite.google.com/app/apikey)
+2. Create a new API key
+3. Add it to your `.env` file
+
+## 🎮 Usage
+
+### Start the Server
+
+```bash
+python main.py
+```
+
+Or with uvicorn directly:
+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### API Endpoint
+
+**POST** `/api/v1/analyze-document`
+
+**Parameters:**
+- `file`: PDF or DOCX file (required)
+- `chunk_size`: Number of pages per chunk (default: 5)
+- `overlap`: Overlapping pages between chunks (default: 1)
+
+**Example with cURL:**
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/analyze-document" \
+  -F "file=@contract.pdf" \
+  -F "chunk_size=5" \
+  -F "overlap=1"
+```
+
+**Example with Python:**
+
+```python
+import requests
+
+url = "http://localhost:8000/api/v1/analyze-document"
+
+files = {
+    'file': open('contract.pdf', 'rb')
+}
+data = {
+    'chunk_size': 5,
+    'overlap': 1
+}
+
+response = requests.post(url, files=files, data=data)
+result = response.json()
+print(result)
+```
+
+## 📊 Response Format
+
+```json
+{
+  "document_id": "doc_1234567890",
+  "sections": [
+    {
+      "heading": "Contract Terms",
+      "heading_id": "1",
+      "sub_headings": [
+        {
+          "sub_heading": "Payment Terms",
+          "sub_heading_id": "1.1",
+          "clauses": [
+            {
+              "clause": "Payment shall be made within 30 days",
+              "clause_id": "1.1.1",
+              "sub_clauses": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "entities": {
+    "buyer_name": "Acme Corporation",
+    "seller_name": "Tech Solutions Ltd",
+    "dates": ["2024-01-15", "2024-12-31"],
+    "deadlines": ["Payment due: 30 days from invoice"],
+    "alerts": ["Late payment penalty applies"],
+    "addresses": ["123 Main St, New York, NY"]
+  },
+  "tables": [
+    {
+      "table_id": "hf_page_3_table_1",
+      "page": 3,
+      "structure": {
+        "rows": 5,
+        "columns": 3,
+        "headers": ["Item", "Quantity", "Price"],
+        "data": [
+          ["Product A", "10", "$100"],
+          ["Product B", "5", "$50"]
+        ]
+      },
+      "source": "both",
+      "confidence": 0.95
+    }
+  ],
+  "images": {
+    "contains_image": true,
+    "pages": [2, 5],
+    "count": 2
+  },
+  "metadata": {
+    "total_pages": 20,
+    "total_chunks": 4,
+    "total_sections": 15,
+    "total_tables": 3,
+    "total_images": 2
+  },
+  "status": "success"
+}
+```
+
+## 🔍 Processing Flow
+
+### 1️⃣ Upload & Conversion
+- User uploads PDF/DOC with chunk configuration
+- Document converted to pages (text + images + metadata)
+
+### 2️⃣ Chunking
+- Pages split into overlapping chunks
+- Metadata preserved (page_start, page_end)
+
+### 3️⃣ Text LLM Processing (Gemini)
+- Extract document structure (headings, clauses)
+- Identify entities (names, dates, addresses)
+- Detect table presence from text context
+
+### 4️⃣ Table Detection (HuggingFace)
+- Visual table detection on page images
+- Bounding box extraction
+- Confidence scoring
+
+### 5️⃣ Conflict Resolution
+- Compare Text LLM vs HF detections
+- Resolve conflicts intelligently:
+  - Both detect → Confirmed table (high confidence)
+  - Only HF detects → Use HF detection
+  - Only LLM detects → Send to Table LLM for validation
+
+### 6️⃣ Table Structure Extraction
+- Gemini processes confirmed tables
+- Extracts complete structure (rows, columns, headers, data)
+- NO DATA LOSS - all cells captured
+
+### 7️⃣ Result Aggregation
+- Merge all chunk results
+- Deduplicate overlapping content
+- Generate final structured output
+
+## 🎨 Key Features
+
+### Robust Table Detection
+- **Dual Detection System**: Combines text analysis and computer vision
+- **No Content Loss**: Multiple validation stages ensure complete data extraction
+- **Conflict Resolution**: Intelligent merging of detection results
+- **High Accuracy**: Confidence scoring for each table
+
+### Intelligent Chunking
+- Configurable chunk size and overlap
+- Preserves context across chunk boundaries
+- Efficient processing of large documents
+
+### Comprehensive Entity Extraction
+- Party identification (buyer/seller)
+- Date and deadline extraction
+- Critical alerts identification
+- Address extraction
+
+## 🛠️ Configuration
+
+### Chunk Size Configuration
+- **Small chunks (2-3 pages)**: Better for detailed analysis, more API calls
+- **Medium chunks (5-7 pages)**: Balanced performance
+- **Large chunks (10+ pages)**: Faster processing, may miss context
+
+### Overlap Configuration
+- **No overlap (0)**: Fastest, risk of missing cross-page content
+- **Small overlap (1-2)**: Recommended for most documents
+- **Large overlap (3+)**: Best for complex documents with interconnected sections
+
+## 📝 Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GEMINI_API_KEY` | Your Gemini API key | Required |
+| `HOST` | Server host | 0.0.0.0 |
+| `PORT` | Server port | 8000 |
+| `MAX_UPLOAD_SIZE` | Max file size in bytes | 52428800 (50MB) |
+| `TABLE_CONFIDENCE_THRESHOLD` | Min confidence for HF detection | 0.7 |
+
+## 🐛 Troubleshooting
+
+### Model Download Issues
+If HuggingFace models fail to download:
+```bash
+export HF_HOME=/path/to/cache
+huggingface-cli login  # Optional: for gated models
+```
+
+### CUDA/GPU Issues
+For CPU-only processing:
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+```
+
+### Large File Processing
+For very large documents:
+- Increase `MAX_UPLOAD_SIZE` in `.env`
+- Use smaller `chunk_size`
+- Consider implementing async processing
+
+## 📚 API Documentation
+
+Interactive API documentation available at:
+- Swagger UI: `http://localhost:8000/docs`
+- ReDoc: `http://localhost:8000/redoc`
+
+## 🤝 Contributing
+
+Contributions welcome! Please feel free to submit pull requests or open issues.
+
+## 📄 License
+
+[Your License Here]
+
+## 🙏 Acknowledgments
+
+- Google Gemini 2.5 Flash for text and structure analysis
+- Microsoft Table Transformer for visual table detection
+- FastAPI for the excellent web framework
