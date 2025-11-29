@@ -143,6 +143,10 @@ Scan ENTIRE page for:
 • Tables embedded in screenshots
 
 ⚠️ CRITICAL: DETECT TABLE CONTINUATION
+1. Extract ALL rows (no truncation!)
+2. Extract ALL columns
+3. Handle merged cells correctly for both rows and columns
+4. Preserve exact cell values
 • If a table is cut off at the bottom of the page, mark "continues_to_next_page": true
 • If a table starts at the top without headers (continuing from previous page), mark "continued_from_previous_page": true
 • Look for indicators like:

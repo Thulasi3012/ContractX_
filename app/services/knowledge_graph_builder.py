@@ -27,6 +27,19 @@ class KnowledgeGraphBuilder:
         except Exception as e:
             print(f"[ERROR] Neo4j connection failed: {e}")
             self.driver = None
+
+    def _sanitize_value(self, value):
+        """Recursively sanitize values to replace None with empty strings and
+        ensure lists/dicts do not contain None (Neo4j disallows collections
+        containing nulls).
+        """
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            return [self._sanitize_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._sanitize_value(v) for k, v in value.items()}
+        return value
     
     def close(self):
         """Close Neo4j connection"""
