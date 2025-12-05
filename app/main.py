@@ -1,7 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, Query
+from fastapi import FastAPI, UploadFile, File, Query, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import uvicorn
+import asyncio
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -13,12 +15,15 @@ from app.services.pdf_processor import PDFProcessor
 from app.services.text_analyzer import TextAnalyzer
 from app.services.image_detector import ImageDetector
 from app.services.knowledge_graph_builder import KnowledgeGraphBuilder
+from app.services.database_service import DatabaseService
+from app.services.rag_service import RAGService
+from app.services.chatbot_service import ChatbotService
 from app.utils.file_handler import FileHandler
 
 app = FastAPI(
-    title="ContractX - Complete Document Analysis", 
-    version="3.0.0",
-    description="Page-by-page analysis with advanced table detection"
+    title="ContractX - Complete Document Analysis with AI Chatbot", 
+    version="4.0.0",
+    description="Page-by-page analysis with RAG+KG powered chatbot"
 )
 
 app.add_middleware(
@@ -35,9 +40,12 @@ pdf_processor = PDFProcessor()
 text_analyzer = TextAnalyzer()
 image_detector = ImageDetector()
 kg_builder = KnowledgeGraphBuilder()
+db_service = DatabaseService()
+rag_service = RAGService()
+chatbot_service = ChatbotService()
 
 print("=" * 80)
-print("ContractX - Complete Document Analysis System v3.0")
+print("ContractX - Complete Document Analysis System v4.0")
 print("=" * 80)
 print("Features:")
 print("  - Page-by-page processing")
@@ -46,177 +54,68 @@ print("  - Advanced multi-scale table detection")
 print("  - Gemini table extraction with merged cell handling")
 print("  - Image/visual detection (charts, graphs, diagrams)")
 print("  - Knowledge Graph construction (Neo4j)")
+print("  - Database storage (PostgreSQL/MySQL)")
+print("  - RAG (Vector embeddings with ChromaDB)")
+print("  - AI Chatbot (RAG + KG combined retrieval)")
 print("=" * 80)
+
+# Pydantic models for request validation
+class ChatRequest(BaseModel):
+    question: str
+    include_rag: bool = True
+    include_kg: bool = True
+    n_results: int = 8
+
+class ChatResponse(BaseModel):
+    document_id: str
+    question: str
+    answer: str
+    sources: dict
+    context_used: dict
+    confidence: str
+
 
 @app.post("/api/v1/extract-and-build-kg")
 async def extract_and_build_kg(
     file: UploadFile = File(...),
-    dpi: int = Query(350, ge=100, le=600, description="Image resolution for table detection"),
-    build_kg: bool = Query(True, description="Build knowledge graph in Neo4j")
-):
-    """
-    Complete pipeline: Extract document + Build Knowledge Graph
-    
-    1. Extract document (text, tables, visuals)
-    2. Build knowledge graph in Neo4j
-    3. Return both extraction results and KG stats
-    """
-    request_id = f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    print("\n" + "=" * 80)
-    print(f"NEW REQUEST (with KG): {request_id}")
-    print(f"File: {file.filename}")
-    print(f"Build KG: {build_kg}")
-    print("=" * 80)
-    
-    try:
-        # Step 1: Save and convert PDF
-        print("\n[Step 1] Saving and converting PDF...")
-        file_path = await file_handler.save_upload(file)
-        pages = await pdf_processor.extract_pages(file_path, dpi=dpi)
-        total_pages = len(pages)
-        print(f"[OK] Extracted {total_pages} pages at {dpi} DPI")
-        
-        # Step 2: Process each page
-        print(f"\n[Step 2] Processing {total_pages} pages...")
-        print("=" * 80)
-        
-        all_page_results = []
-        total_tables_found = 0
-        total_visuals_found = 0
-        
-        for page_num, page_data in enumerate(pages, start=1):
-            print(f"\n{'='*60}")
-            print(f"Processing Page {page_num}/{total_pages}")
-            print(f"{'='*60}")
-            
-            page_result = await process_single_page(
-                page_number=page_num,
-                page_data=page_data,
-                total_pages=total_pages,
-                pdf_path=file_path
-            )
-            
-            all_page_results.append(page_result)
-            
-            tables_on_page = len(page_result.get('tables', []))
-            visuals_on_page = len(page_result.get('visuals', []))
-            total_tables_found += tables_on_page
-            total_visuals_found += visuals_on_page
-            
-            print(f"[OK] Page {page_num} complete:")
-            print(f"  - Text sections: {page_result['text_analysis']['sections_count']}")
-            print(f"  - Tables found: {tables_on_page}")
-            print(f"  - Visuals found: {visuals_on_page}")
-            if visuals_on_page > 0:
-                types = page_result['image_detection']['types']
-                print(f"  - Visual types: {', '.join(types)}")
-        
-        # Step 3: Create final response
-        print("\n" + "=" * 80)
-        print("[Step 3] Consolidating results...")
-        
-        final_result = {
-            "request_id": request_id,
-            "filename": file.filename,
-            "total_pages": total_pages,
-            "pages": all_page_results,
-            "summary": create_summary(all_page_results),
-            "metadata": {
-                "dpi": dpi,
-                "extraction_method": "gemini-table-extractor",
-                "text_model": "gemini-2.0-flash-exp",
-                "table_extraction_model": Config.GEMINI_MODEL,                
-                "version": "3.0.0",
-                "features": [
-                    "Multi-scale table detection",
-                    "Merged cell handling",
-                    "Page-by-page processing",
-                    "Automatic retry on failure",
-                    "Image/visual detection",
-                    "Knowledge graph construction"
-                ]
-            },
-            "status": "success",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-        print(f"\n[SUCCESS] Document analysis complete!")
-        print(f"  Total pages: {total_pages}")
-        print(f"  Total tables: {total_tables_found}")
-        print(f"  Total visuals: {total_visuals_found}")
-        print(f"  Total sections: {final_result['summary']['total_sections']}")
-        
-        # Step 4: Build Knowledge Graph (if requested)
-        if build_kg:
-            print("\n" + "=" * 80)
-            print("[Step 4] Building Knowledge Graph...")
-            kg_result = kg_builder.build_graph(final_result)
-            final_result['knowledge_graph'] = kg_result
-            
-            # Check if KG build was successful
-            if kg_result.get('status') == 'success':
-                print(f"[OK] Knowledge Graph built: {kg_result['total_nodes']} nodes, {kg_result['total_relationships']} relationships")
-            elif 'error' in kg_result:
-                print(f"[WARNING] Knowledge Graph build failed: {kg_result['error']}")
-            else:
-                print(f"[WARNING] Knowledge Graph build failed with unknown error")
-        else:
-            final_result['knowledge_graph'] = {"status": "skipped"}
-        
-        print("=" * 80)
-        
-        # Cleanup
-        await file_handler.cleanup(file_path)
-        
-        return JSONResponse(content=final_result, status_code=200)
-        
-    except Exception as e:
-        print(f"\n[ERROR] Request {request_id} failed: {str(e)}")
-        print("=" * 80)
-        
-        return JSONResponse(
-            content={
-                "error": str(e),
-                "request_id": request_id,
-                "status": "failed"
-            },
-            status_code=500
-        )
-
-
-@app.post("/api/v1/extract-document")
-async def extract_document(
-    file: UploadFile = File(...),
     dpi: int = Query(350, ge=100, le=600, description="Image resolution for table detection")
 ):
     """
-    Complete document extraction:
-    1. Extract pages from PDF
-    2. For each page:
-       - Analyze text (sections, entities, clauses)
-       - Detect tables (multi-scale detection)
-       - Extract table structure (Gemini with merged cells)
-    3. Return complete structured data
+    Complete pipeline: Extract + Database + Knowledge Graph + RAG Indexing
+    
+    ALWAYS processes with:
+    - Database storage enabled ✓
+    - Knowledge Graph building enabled ✓
+    - RAG indexing enabled ✓
+    
+    Parameters:
+    - file: PDF file to analyze
+    - dpi: Image resolution (100-600, default: 350)
+    
+    Returns: Complete analysis with document_id, database status, KG status, RAG status
     """
     request_id = f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     print("\n" + "=" * 80)
-    print(f"NEW REQUEST: {request_id}")
+    print(f"NEW REQUEST (Full Pipeline): {request_id}")
     print(f"File: {file.filename}")
     print(f"DPI: {dpi}")
+    print("Processing with:")
+    print("  ✓ Database Storage (ENABLED)")
+    print("  ✓ Knowledge Graph Building (ENABLED)")
+    print("  ✓ RAG Indexing (ENABLED)")
     print("=" * 80)
     
     try:
         # Step 1: Save and convert PDF
-        print("\n[Step 1] Saving and converting PDF...")
+        print("\n[Step 1/6] Saving and converting PDF...")
         file_path = await file_handler.save_upload(file)
         pages = await pdf_processor.extract_pages(file_path, dpi=dpi)
         total_pages = len(pages)
         print(f"[OK] Extracted {total_pages} pages at {dpi} DPI")
         
         # Step 2: Process each page
-        print(f"\n[Step 2] Processing {total_pages} pages...")
+        print(f"\n[Step 2/6] Processing {total_pages} pages...")
         print("=" * 80)
         
         all_page_results = []
@@ -237,7 +136,6 @@ async def extract_document(
             
             all_page_results.append(page_result)
             
-            # Count tables and visuals
             tables_on_page = len(page_result.get('tables', []))
             visuals_on_page = len(page_result.get('visuals', []))
             total_tables_found += tables_on_page
@@ -247,13 +145,10 @@ async def extract_document(
             print(f"  - Text sections: {page_result['text_analysis']['sections_count']}")
             print(f"  - Tables found: {tables_on_page}")
             print(f"  - Visuals found: {visuals_on_page}")
-            if visuals_on_page > 0:
-                types = page_result['image_detection']['types']
-                print(f"  - Visual types: {', '.join(types)}")
         
         # Step 3: Create final response
         print("\n" + "=" * 80)
-        print("[Step 3] Consolidating results...")
+        print("[Step 3/6] Consolidating results...")
         
         final_result = {
             "request_id": request_id,
@@ -264,14 +159,18 @@ async def extract_document(
             "metadata": {
                 "dpi": dpi,
                 "extraction_method": "gemini-table-extractor",
-                "text_model": "gemini-2.0-flash-exp",
+                "text_model": "gemini-2.0-flash",
                 "table_extraction_model": Config.GEMINI_MODEL,                
-                "version": "3.0.0",
+                "version": "4.0.0",
                 "features": [
                     "Multi-scale table detection",
                     "Merged cell handling",
                     "Page-by-page processing",
-                    "Automatic retry on failure"
+                    "Image/visual detection",
+                    "Knowledge graph construction",
+                    "Database storage",
+                    "RAG vector indexing",
+                    "AI Chatbot ready"
                 ]
             },
             "status": "success",
@@ -282,7 +181,90 @@ async def extract_document(
         print(f"  Total pages: {total_pages}")
         print(f"  Total tables: {total_tables_found}")
         print(f"  Total visuals: {total_visuals_found}")
-        print(f"  Total sections: {final_result['summary']['total_sections']}")
+        
+        # Step 3.5: Generate overall summary before storing to DB
+        print("\n[Step 3.5/6] Generating overall document summary...")
+        overall_summary = db_service._generate_overall_summary(all_page_results)
+        final_result['overall_summary'] = overall_summary
+
+        print(f"[OK] Overall summary generated")
+        print(f"  - Document Type: {overall_summary['document_type']}")
+        print(f"  - Buyer: {overall_summary['entities']['buyer_name']}")
+        print(f"  - Seller: {overall_summary['entities']['seller_name']}")
+        print(f"  - Summary: {len(overall_summary['summary'])} characters")
+        
+        # Step 4: Save to Database (CRITICAL: Get UUID first)
+        # ALWAYS ENABLED
+        print("\n" + "=" * 80)
+        print("[Step 4/6] Saving to database...")
+        document_id = None
+        try:
+            document_id = db_service.store_document(final_result)
+            final_result['database'] = {
+                "status": "success",
+                "document_id": document_id,
+                "message": "Document stored successfully"
+            }
+            print(f"[OK] Document saved with ID: {document_id}")
+        except Exception as db_error:
+            final_result['database'] = {
+                "status": "failed",
+                "error": str(db_error),
+                "message": "Failed to store document in database"
+            }
+            print(f"[ERROR] Database storage failed: {str(db_error)}")
+            raise
+        
+        # Step 5: Build Knowledge Graph (ALWAYS ENABLED)
+        print("\n" + "=" * 80)
+        print("[Step 5/6] Building Knowledge Graph...")
+        try:
+            kg_result = kg_builder.build_graph(final_result, db_document_id=document_id)
+            final_result['knowledge_graph'] = kg_result
+            
+            if kg_result.get('status') == 'success':
+                print(f"[OK] Knowledge Graph built with document_id: {document_id}")
+                print(f"  - Nodes: {kg_result.get('total_nodes', 0)}")
+                print(f"  - Relationships: {kg_result.get('total_relationships', 0)}")
+            else:
+                print(f"[WARNING] Knowledge Graph build failed: {kg_result.get('error', 'Unknown')}")
+        except Exception as kg_error:
+            final_result['knowledge_graph'] = {
+                "status": "failed",
+                "error": str(kg_error)
+            }
+            print(f"[ERROR] Knowledge Graph build failed: {str(kg_error)}")
+            raise
+        
+        # Step 6: Index in RAG (ALWAYS ENABLED)
+        print("\n" + "=" * 80)
+        print("[Step 6/6] Indexing in RAG vector store...")
+        try:
+            rag_result = rag_service.index_document(document_id, final_result)
+            final_result['rag_indexing'] = rag_result
+            print(f"[OK] RAG indexing complete: {rag_result['total_chunks']} chunks")
+            print(f"  - Sections: {rag_result['chunk_types'].get('sections', 0)}")
+            print(f"  - Tables: {rag_result['chunk_types'].get('tables', 0)}")
+            print(f"  - Visuals: {rag_result['chunk_types'].get('visuals', 0)}")
+        except Exception as rag_error:
+            final_result['rag_indexing'] = {
+                "status": "failed",
+                "error": str(rag_error)
+            }
+            print(f"[ERROR] RAG indexing failed: {str(rag_error)}")
+            raise
+        
+        print("\n" + "=" * 80)
+        print("✓ DOCUMENT PROCESSING COMPLETE!")
+        print("=" * 80)
+        print(f"Document ID: {document_id}")
+        print(f"✓ Database: {final_result['database']['status']}")
+        print(f"✓ Knowledge Graph: {final_result['knowledge_graph']['status']}")
+        print(f"✓ RAG Indexing: {final_result['rag_indexing']['status']}")
+        print("\n📝 You can now ask questions using:")
+        print(f"   POST /api/v1/chatbot/{document_id}")
+        print("\n📊 Example question:")
+        print('   {"question": "Who is the buyer?", "include_rag": true, "include_kg": true}')
         print("=" * 80)
         
         # Cleanup
@@ -303,14 +285,8 @@ async def extract_document(
             status_code=500
         )
 
-
 async def process_single_page(page_number: int, page_data: dict, total_pages: int, pdf_path: str = None) -> dict:
-    """
-    Process a single page completely:
-    1. Text analysis
-    2. Table detection & extraction (using Gemini directly)
-    3. Image/visual detection
-    """
+    """Process a single page completely"""
     result = {
         "page_number": page_number,
         "text_analysis": {},
@@ -319,67 +295,33 @@ async def process_single_page(page_number: int, page_data: dict, total_pages: in
         "image_detection": {}
     }
     
-    # Step 1: Text Analysis
-    print(f"\n  [1/3] Analyzing text content...")
     result["text_analysis"] = await text_analyzer.analyze_text(
         page_number=page_number,
         page_data=page_data
     )
-    print(f"  [OK] Found {result['text_analysis']['sections_count']} sections")
     
-    # Step 2: Table Detection & Extraction (Combined with Gemini)
-    print(f"\n  [2/3] Detecting and extracting tables...")
     table_result = await pdf_processor.detect_tables_in_page(
-    page_image=page_data['pil_image'],
-    page_num=page_number,
-    total_pages=total_pages
+        page_image=page_data['pil_image'],
+        page_num=page_number,
+        total_pages=total_pages
     )
-
     result["tables"] = table_result.get("tables", [])
-    # Use the tables already extracted by pdf_processor
-    if result["tables"]:
-        print(f"  [OK] Found {len(result['tables'])} table(s)")
-
-        # Print table details
-        for idx, table in enumerate(result['tables'], start=1):
-            rows = table.get('total_rows', 0)
-            cols = table.get('total_columns', 0)
-            print(f"    [i] Table {idx}: {rows}x{cols}")
-
-            if table.get('has_merged_cells'):
-                print(f"        → Has merged cells: {table.get('merged_cells', 'Yes')}")
-
-            if table.get('continued_from_previous_page'):
-                print(f"        → Continued from previous page")
-
-            if table.get('continues_to_next_page'):
-                print(f"        → Continues to next page")
-    else:
-        print(f"  [i] No tables detected on this page")
     
-    # Step 3: Image/Visual Detection
-    print(f"\n  [3/3] Detecting images and visuals...")
-    detected_visuals = image_detector.detect_images(
+    # FIX: Properly await the async image detector
+    detected_visuals = await image_detector.detect_images(
         page_image=page_data['pil_image'],
         page_number=page_number,
         pdf_path=pdf_path
     )
     
     result['visuals'] = detected_visuals
-    
-    # Image detection summary
     result["image_detection"] = {
         "has_visuals": len(detected_visuals) > 0,
         "visual_count": len(detected_visuals),
-        "types": list(set([v['type'] for v in detected_visuals])) if detected_visuals else []
+        "types": list(set([v.get('type') for v in detected_visuals if v.get('type') and v.get('type') is not None])),
+        "with_summaries": True,
+        "visuals_data": detected_visuals
     }
-    
-    if detected_visuals:
-        print(f"  [OK] Found {len(detected_visuals)} visual(s)")
-        for visual in detected_visuals:
-            print(f"    [i] {visual['type']}: {visual.get('description', 'N/A')}")
-    else:
-        print(f"  [i] No visuals detected on this page")
     
     return result
 
@@ -397,32 +339,31 @@ def create_summary(page_results):
             "seller_name": None,
             "dates": [],
             "deadlines": [],
-            "alerts": []
-        }
+            "alerts": [],
+            "obligations": [],
+            "addresses": [],
+            "contact_info": {}
+        },
+        "document_type": None
     }
     
     for page in page_results:
-        # Sections
         summary['total_sections'] += page['text_analysis']['sections_count']
         
-        # Tables
         table_count = len(page['tables'])
         if table_count > 0:
             summary['pages_with_tables'] += 1
             summary['total_tables'] += table_count
         
-        # Visuals
         visual_count = len(page['visuals'])
         if visual_count > 0:
             summary['pages_with_visuals'] += 1
             summary['total_visuals'] += visual_count
             
-            # Count visual types
             for visual in page['visuals']:
                 vtype = visual['type']
                 summary['visual_types'][vtype] = summary['visual_types'].get(vtype, 0) + 1
         
-        # Entities
         entities = page['text_analysis']['entities']
         if entities.get('buyer_name') and not summary['entities']['buyer_name']:
             summary['entities']['buyer_name'] = entities['buyer_name']
@@ -432,85 +373,218 @@ def create_summary(page_results):
         summary['entities']['dates'].extend(entities.get('dates', []))
         summary['entities']['deadlines'].extend(entities.get('deadlines', []))
         summary['entities']['alerts'].extend(entities.get('alerts', []))
+        summary['entities']['addresses'].extend(entities.get('addresses', []))
+        
+        if entities.get('obligations'):
+            summary['entities']['obligations'].extend(entities.get('obligations', []))
+        
+        if entities.get('contact_info'):
+            summary['entities']['contact_info'].update(entities.get('contact_info', {}))
     
-    # Deduplicate
-    summary['entities']['dates'] = list(set(summary['entities']['dates']))
-    summary['entities']['deadlines'] = list(set(summary['entities']['deadlines']))
-    summary['entities']['alerts'] = list(set(summary['entities']['alerts']))
+    summary['entities']['dates'] = list(set(filter(None, summary['entities']['dates'])))
+    summary['entities']['deadlines'] = list(set(filter(None, summary['entities']['deadlines'])))
+    summary['entities']['alerts'] = list(set(filter(None, summary['entities']['alerts'])))
+    summary['entities']['addresses'] = list(set(filter(None, summary['entities']['addresses'])))
     
     return summary
 
 
-@app.get("/health")
-async def health_check():
-    """Check system health and model status"""
-    return {
-        "status": "healthy",
-        "models": {
-            "text_analysis": "gemini-2.0-flash-exp",
-            "table_extraction_model": Config.GEMINI_MODEL
-        },
-        "version": "3.0.0"
+# ============================================================================
+# CHATBOT ENDPOINTS - RAG + KG Combined
+# ============================================================================
+
+@app.post("/api/v1/chatbot/{document_id}")
+async def chatbot_query(document_id: str, request: ChatRequest):
+    """
+    AI Chatbot endpoint - Ask questions about a specific document
+    
+    Combines:
+    - RAG (vector similarity search)
+    - Knowledge Graph (structured data retrieval)
+    - Gemini LLM (answer generation)
+    
+    Example:
+    ```
+    POST /api/v1/chatbot/abcd-1234-xyz-987
+    {
+        "question": "What is the payment term?",
+        "include_rag": true,
+        "include_kg": true,
+        "n_results": 8
     }
+    ```
+    """
+    try:
+        result = chatbot_service.chat(
+            document_id=document_id,
+            question=request.question,
+            include_rag=request.include_rag,
+            include_kg=request.include_kg,
+            n_rag_results=request.n_results
+        )
+        
+        return JSONResponse(content=result, status_code=200)
+    
+    except Exception as e:
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "document_id": document_id,
+                "question": request.question
+            },
+            status_code=500
+        )
 
 
-# @app.get("/")
-# async def root():
-#     return {
-#         "service": "ContractX Complete Document Analysis",
-#         "version": "3.0.0",
-#         "endpoints": {
-#             "extract": "/api/v1/extract-document",
-#             "health": "/health",
-#             "docs": "/docs"
-#         },
-#         "features": [
-#             "Page-by-page processing",
-#             "Multi-scale table detection",
-#             "Gemini table extraction",
-#             "Merged cell handling",
-#             "Text analysis (sections, entities)",
-#             "Automatic retry logic"
-#         ]
-#     }
+@app.get("/api/v1/chatbot/{document_id}/info")
+async def get_chatbot_info(document_id: str):
+    """
+    Get document information for chatbot context
+    Shows what data is available in RAG and KG
+    """
+    try:
+        info = chatbot_service.get_conversation_summary(document_id)
+        return JSONResponse(content=info, status_code=200)
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e), "document_id": document_id},
+            status_code=500
+        )
 
 
-@app.get("/")
-async def root():
-    return {
-        "service": "ContractX Complete Document Analysis",
-        "version": "3.0.0",
-        "endpoints": {
-            "extract": "/api/v1/extract-document",
-            "extract_and_kg": "/api/v1/extract-and-build-kg",
-            "query_kg": "/api/v1/query-kg",
-            "health": "/health",
-            "docs": "/docs"
-        },
-        "features": [
-            "Page-by-page processing",
-            "Multi-scale table detection",
-            "Gemini table extraction",
-            "Merged cell handling",
-            "Text analysis (sections, entities)",
-            "Image/visual detection",
-            "Knowledge graph construction",
-            "Automatic retry logic"
-        ]
-    }
+# ============================================================================
+# DATABASE ENDPOINTS
+# ============================================================================
 
+@app.get("/api/v1/documents")
+async def get_all_documents(skip: int = 0, limit: int = 100):
+    """Retrieve all documents from database"""
+    try:
+        documents = db_service.get_all_documents(skip=skip, limit=limit)
+        return JSONResponse(content={
+            "documents": [
+                {
+                    "id": doc.id,
+                    "document_name": doc.document_name,
+                    "uploaded_on": doc.uploaded_on.isoformat(),
+                    "document_type": doc.document_type,
+                    "page_count": doc.page_count,
+                    "buyer": doc.buyer,
+                    "seller": doc.seller
+                }
+                for doc in documents
+            ],
+            "total": len(documents)
+        })
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/v1/documents/{document_id}")
+async def get_document(document_id: str):
+    """Retrieve specific document by ID"""
+    try:
+        document = db_service.get_document_by_id(document_id)
+        if not document:
+            return JSONResponse(
+                content={"error": "Document not found"}, 
+                status_code=404
+            )
+        
+        return JSONResponse(content={
+            "id": document.id,
+            "document_name": document.document_name,
+            "uploaded_on": document.uploaded_on.isoformat(),
+            "summary": document.summary,
+            "document_type": document.document_type,
+            "buyer": document.buyer,
+            "seller": document.seller,
+            "parties": document.parties_json,
+            "deadlines": document.deadlines,
+            "alerts": document.alerts,
+            "obligations": document.obligations,
+            "page_count": document.page_count,
+            "text_as_json": document.text_as_json
+        })
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/v1/documents/{document_id}")
+async def delete_document(document_id: str):
+    """Delete document from all systems (DB, KG, RAG)"""
+    try:
+        print(f"\n[DELETE] Removing document: {document_id}")
+        print("=" * 80)
+        
+        # Delete from database
+        print("[1/3] Deleting from Database...")
+        db_success = db_service.delete_document(document_id)
+        if db_success:
+            print(f"[OK] Database: Deleted successfully")
+        else:
+            print(f"[WARNING] Database: Document not found")
+        
+        # Delete from Knowledge Graph
+        print("[2/3] Deleting from Knowledge Graph...")
+        kg_success = kg_builder.delete_document(document_id)
+        if kg_success:
+            print(f"[OK] Knowledge Graph: Deleted successfully")
+        else:
+            print(f"[WARNING] Knowledge Graph: Document not found or deletion failed")
+        
+        # Delete from RAG
+        print("[3/3] Deleting from RAG Vector Store...")
+        rag_success = rag_service.delete_document(document_id)
+        if rag_success:
+            print(f"[OK] RAG: Deleted successfully")
+        else:
+            print(f"[WARNING] RAG: Document not found")
+        
+        print("=" * 80)
+        
+        # Return success if deleted from at least one system
+        if db_success or kg_success or rag_success:
+            return JSONResponse(content={
+                "status": "success",
+                "message": "Document deleted from all systems",
+                "document_id": document_id,
+                "deleted_from": {
+                    "database": db_success,
+                    "knowledge_graph": kg_success,
+                    "rag": rag_success
+                }
+            }, status_code=200)
+        else:
+            return JSONResponse(
+                content={
+                    "status": "failed",
+                    "error": "Document not found in any system",
+                    "document_id": document_id
+                }, 
+                status_code=404
+            )
+            
+    except Exception as e:
+        print(f"[ERROR] Delete operation failed: {str(e)}")
+        print("=" * 80)
+        
+        return JSONResponse(
+            content={
+                "error": str(e),
+                "document_id": document_id
+            }, 
+            status_code=500
+        )
+
+
+# ============================================================================
+# KNOWLEDGE GRAPH ENDPOINTS
+# ============================================================================
 
 @app.post("/api/v1/query-kg")
 async def query_knowledge_graph(cypher_query: str = Query(..., description="Cypher query to execute")):
-    """
-    Query the knowledge graph using Cypher
-    
-    Example queries:
-    - Get all sections: MATCH (s:Section) RETURN s LIMIT 10
-    - Find buyer: MATCH (b:Buyer) RETURN b
-    - Get tables with merged cells: MATCH (t:Table {has_merged_cells: true}) RETURN t
-    - Get page structure: MATCH (p:Page {page_number: 1})-[r]->(n) RETURN p, r, n
-    """
+    """Query the knowledge graph using Cypher"""
     try:
         results = kg_builder.query_graph(cypher_query)
         return JSONResponse(content={"results": results, "count": len(results)})
@@ -526,6 +600,129 @@ async def clear_knowledge_graph():
         return JSONResponse(content={"status": "Graph cleared successfully"})
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# ============================================================================
+# RAG ENDPOINTS
+# ============================================================================
+
+@app.get("/api/v1/rag/stats/{document_id}")
+async def get_rag_stats(document_id: str):
+    """Get RAG indexing statistics for a document"""
+    try:
+        stats = rag_service.get_document_stats(document_id)
+        return JSONResponse(content=stats, status_code=200)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/v1/rag/search")
+async def rag_search(
+    query: str = Body(...),
+    document_id: str = Body(None),
+    n_results: int = Body(8)
+):
+    """Direct RAG search endpoint (without LLM)"""
+    try:
+        results = rag_service.search(
+            query=query,
+            document_id=document_id,
+            n_results=n_results
+        )
+        return JSONResponse(content={"results": results, "count": len(results)})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/v1/rag/clear")
+async def clear_rag():
+    """Clear entire RAG vector store (use with caution!)"""
+    try:
+        rag_service.clear_all()
+        return JSONResponse(content={"status": "RAG store cleared successfully"})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# ============================================================================
+# SYSTEM ENDPOINTS
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Check system health and model status"""
+    return {
+        "status": "healthy",
+        "models": {
+            "text_analysis": "gemini-2.0-flash-exp",
+            "table_extraction": Config.GEMINI_MODEL,
+            "embeddings": "text-embedding-004",
+            "chatbot": "gemini-2.0-flash-exp"
+        },
+        "version": "4.0.0",
+        "services": {
+            "database": "connected",
+            "knowledge_graph": "connected" if kg_builder.driver else "disconnected",
+            "rag": "active",
+            "chatbot": "ready"
+        }
+    }
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "ContractX Complete Document Analysis with AI Chatbot",
+        "version": "4.0.0",
+        "endpoints": {
+            "extraction": {
+                "extract": "/api/v1/extract-document",
+                "extract_full": "/api/v1/extract-and-build-kg"
+            },
+            "chatbot": {
+                "query": "/api/v1/chatbot/{document_id}",
+                "info": "/api/v1/chatbot/{document_id}/info"
+            },
+            "documents": {
+                "list": "/api/v1/documents",
+                "get": "/api/v1/documents/{document_id}",
+                "delete": "/api/v1/documents/{document_id}"
+            },
+            "knowledge_graph": {
+                "query": "/api/v1/query-kg",
+                "clear": "/api/v1/clear-kg"
+            },
+            "rag": {
+                "stats": "/api/v1/rag/stats/{document_id}",
+                "search": "/api/v1/rag/search",
+                "clear": "/api/v1/rag/clear"
+            },
+            "system": {
+                "health": "/health",
+                "docs": "/docs"
+            }
+        },
+        "features": [
+            "Document extraction (text, tables, visuals)",
+            "Database storage with UUID",
+            "Knowledge Graph (Neo4j)",
+            "RAG vector indexing (ChromaDB)",
+            "AI Chatbot (RAG + KG combined)",
+            "Multi-document support",
+            "Semantic search",
+            "Entity extraction",
+            "Automatic retry logic"
+        ],
+        "usage": {
+            "1_upload": "POST /api/v1/extract-and-build-kg (with PDF file)",
+            "2_chat": "POST /api/v1/chatbot/{document_id} with question",
+            "3_example": {
+                "question": "What is the payment term?",
+                "include_rag": True,
+                "include_kg": True
+            }
+        }
+    }
 
 
 if __name__ == "__main__":

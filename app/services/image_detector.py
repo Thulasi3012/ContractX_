@@ -1,20 +1,23 @@
 """
-Advanced Image/Visual Detection using OpenCV
-Detects charts, graphs, diagrams, Gantt charts, and other visuals
-Based on edge detection, entropy, and morphological operations
+Advanced Image/Visual Detection using OpenCV + Gemini Analysis
+Detects charts, graphs, diagrams, Gantt charts with AI-powered summaries
 """
 
 import cv2
 import numpy as np
-import fitz  # PyMuPDF
+import fitz
+import asyncio
+import json
 from typing import List, Dict, Any, Tuple
 from PIL import Image
+import google.generativeai as genai
+from app.config.config import Config
 
 class ImageDetector:
-    """Detect non-table visuals (charts, graphs, diagrams, images)"""
+    """Detect and analyze non-table visuals with Gemini"""
     
     def __init__(self):
-        # Strict detection parameters (default)
+        # Detection parameters
         self.DPI = 250
         self.MIN_AREA = 20000
         self.MIN_W = 120
@@ -22,41 +25,63 @@ class ImageDetector:
         self.EDGE_DENSITY_THRESHOLD = 0.003
         self.ENTROPY_THRESHOLD = 3.0
         
-        # Permissive fallback parameters (for difficult visuals like Gantt)
+        # Permissive parameters
         self.MIN_AREA_PERMISSIVE = 8000
         self.EDGE_DENSITY_THRESHOLD_PERMISSIVE = 0.0015
         self.ENTROPY_THRESHOLD_PERMISSIVE = 2.5
         self.MIN_W_PERMISSIVE = 80
         self.MIN_H_PERMISSIVE = 60
         
-        print("[OK] ImageDetector initialized")
+        # Header/footer detection
+        self.HEADER_FOOTER_MARGIN = 100
+        self.MAX_PAGE_COVERAGE = 0.85
+        
+        # Gemini config
+        self.LLM_MODEL = "gemini-2.5-flash"
+        self.GEMINI_RETRY_SLEEP = 25
+        self.MAX_PARALLEL = 4
+        
+        # Initialize Gemini
+        api_key = Config.GEMINI_API_KEY
+        if not api_key:
+            raise RuntimeError("Missing GEMINI_API_KEY")
+        
+        genai.configure(api_key=api_key)
+        self.llm = genai.GenerativeModel(self.LLM_MODEL)
+        
+        print("[OK] ImageDetector initialized with Gemini analysis")
         print(f"  - DPI: {self.DPI}")
         print(f"  - Min area (strict): {self.MIN_AREA}px")
         print(f"  - Min area (permissive): {self.MIN_AREA_PERMISSIVE}px")
+        print(f"  - Gemini Model: {self.LLM_MODEL}")
     
     def get_status(self) -> Dict[str, Any]:
         """Get detector status"""
         return {
             "model": "opencv-morphological-detection",
+            "analyzer": "gemini-visual-analysis",
             "dpi": self.DPI,
             "min_area_strict": self.MIN_AREA,
             "min_area_permissive": self.MIN_AREA_PERMISSIVE
         }
     
-    def detect_images(
+    async def detect_images(
         self, 
         page_image: Image.Image,
         page_number: int,
         pdf_path: str = None
     ) -> List[Dict[str, Any]]:
         """
-        Detect visual elements (charts, graphs, diagrams) on a page
+        Detect visual elements and send to Gemini for analysis (ASYNC)
         
         Returns:
-            List of detected visuals with bbox and type
+            List of detected visuals with bbox, type, and AI-generated summary
         """
+        print(f"\n[IMAGE DETECTOR] Processing page {page_number}...")
+        
         # Convert PIL to OpenCV
         page_bgr = cv2.cvtColor(np.array(page_image), cv2.COLOR_RGB2BGR)
+        h, w = page_bgr.shape[:2]
         
         # Get text boxes to mask them out
         text_boxes = []
@@ -66,9 +91,9 @@ class ImageDetector:
         # Apply text mask
         masked_gray, mask = self._apply_text_mask(page_bgr, text_boxes)
         
-        # Check if page is text-heavy
+        # Detect visuals
         if self._page_is_text_heavy(page_bgr, text_boxes, threshold=0.90):
-            print(f"    [i] Page {page_number} is >90% text, using permissive mode only")
+            print(f"  [i] Page {page_number} is >90% text, using permissive mode only")
             boxes = self._detect_visuals_permissive(page_bgr, mask)
         else:
             # Try strict detection first
@@ -76,32 +101,179 @@ class ImageDetector:
             
             # Fallback to permissive if nothing found
             if not boxes:
-                print(f"    [i] No strict detections, trying permissive mode...")
+                print(f"  [i] No strict detections, trying permissive mode...")
                 boxes = self._detect_visuals_permissive(page_bgr, mask)
         
         if not boxes:
+            print(f"  [OK] No visuals detected on page {page_number}")
             return []
         
-        print(f"    [OK] Detected {len(boxes)} visual(s)")
+        print(f"  [OK] Detected {len(boxes)} candidate visual(s), sending to Gemini...")
         
-        # Classify each visual
-        results = []
-        for idx, bbox in enumerate(boxes, start=1):
-            x1, y1, x2, y2 = bbox
-            crop = page_bgr[y1:y2, x1:x2]
-            
-            visual_type = self._classify_visual(crop)
-            
-            results.append({
-                "visual_id": f"page_{page_number}_visual_{idx}",
-                "bbox": bbox,
-                "type": visual_type,
-                "width": x2 - x1,
-                "height": y2 - y1,
-                "area": (x2 - x1) * (y2 - y1)
-            })
+        # AWAIT the async processing
+        results = await self._process_visuals_async(
+            page_number=page_number,
+            page_bgr=page_bgr,
+            boxes=boxes,
+            page_height=h,
+            page_width=w
+        )
         
         return results
+    
+    async def _process_visuals_async(
+        self,
+        page_number: int,
+        page_bgr: np.ndarray,
+        boxes: List[List[int]],
+        page_height: int,
+        page_width: int
+    ) -> List[Dict[str, Any]]:
+        """Process visuals asynchronously with Gemini"""
+        sem = asyncio.Semaphore(self.MAX_PARALLEL)
+        results = []
+        
+        async def process_single_visual(bbox_idx: int, bbox: List[int]):
+            async with sem:
+                try:
+                    visual_id = f"page_{page_number}_visual_{bbox_idx + 1}"
+                    
+                    # Crop and convert to bytes
+                    x1, y1, x2, y2 = bbox
+                    crop = page_bgr[y1:y2, x1:x2]
+                    _, buf = cv2.imencode(".png", crop)
+                    crop_bytes = buf.tobytes()
+                    
+                    # Pre-filter: Check if it's likely a table
+                    if self._is_likely_table(crop):
+                        print(f"    [i] {visual_id} detected as table, skipping")
+                        return None
+                    
+                    # Send to Gemini
+                    analysis = await self._analyze_visual_with_gemini(crop_bytes, visual_id)
+                    
+                    if analysis.get("not_visual"):
+                        print(f"    [i] {visual_id} marked as not_visual by Gemini")
+                        return None
+                    
+                    # Add metadata
+                    analysis["visual_id"] = visual_id
+                    analysis["page_number"] = page_number
+                    analysis["bbox"] = bbox
+                    analysis["width"] = x2 - x1
+                    analysis["height"] = y2 - y1
+                    analysis["area"] = (x2 - x1) * (y2 - y1)
+                    
+                    print(f"    [OK] {visual_id}: type={analysis.get('type')}, summary_len={len(analysis.get('summary', ''))}")
+                    return analysis
+                    
+                except Exception as e:
+                    print(f"    [ERROR] Failed to process bbox {bbox_idx}: {str(e)}")
+                    return None
+        
+        # Create tasks for all boxes
+        tasks = [process_single_visual(idx, bbox) for idx, bbox in enumerate(boxes)]
+        
+        # Gather results
+        gathered = await asyncio.gather(*tasks, return_exceptions=False)
+        
+        # Filter out None results
+        results = [r for r in gathered if r is not None]
+        
+        return results
+    
+    async def _analyze_visual_with_gemini(self, image_bytes: bytes, visual_id: str) -> Dict[str, Any]:
+        """Send visual to Gemini for analysis"""
+        prompt = f"""
+Analyze this visual from a PDF document page.
+
+CRITICAL RULES:
+- Extract ONLY information clearly visible in the image
+- Never infer, estimate, approximate, assume, or fabricate values
+- Any partially unreadable element must be null, not guessed
+- Do NOT reinterpret scales, ranges, dates, or numeric axes
+- Ignore headers, footers, logos, watermarks, decorative elements
+- If visual is small or dont understandable, respond with "unreadable": true
+- If this is a TABLE (data in rows/columns), respond with "not_visual": true
+- Allowed visuals: chart, graph, diagram, map, flowchart, gantt, image, signature
+- For timelines/axes/bars/nodes: record only fully readable text and values
+- Keep original label formatting
+- If scale boundaries unclear: set to null
+- If positional relationships exist: describe ONLY if explicitly shown
+
+OUTPUT FORMAT - STRICT JSON ONLY (no markdown, no explanations):
+
+{{
+  "visual_id": "{visual_id}",
+  "type": "<chart|graph|diagram|map|flowchart|gantt|image|signature|null>",
+  "data": {{}},
+  "summary": "<detailed explanation of what this visual shows, max 500 chars>",
+  "unreadable": false,
+  "not_visual": false
+}}
+"""
+        
+        try:
+            contents = [
+                {"mime_type": "image/png", "data": image_bytes},
+                {"text": prompt}
+            ]
+            
+            response = await self.llm.generate_content_async(contents=contents)
+            raw_text = response.text or ""
+            
+            # Extract JSON
+            start = raw_text.find("{")
+            end = raw_text.rfind("}") + 1
+            
+            if start >= 0 and end > start:
+                json_str = raw_text[start:end]
+                analysis = json.loads(json_str)
+            else:
+                analysis = {
+                    "type": None,
+                    "data": {},
+                    "summary": "Failed to parse Gemini response",
+                    "unreadable": True,
+                    "not_visual": True
+                }
+            
+            # Ensure required fields
+            analysis.setdefault("visual_id", visual_id)
+            analysis.setdefault("type", None)
+            analysis.setdefault("data", {})
+            analysis.setdefault("summary", "")
+            analysis.setdefault("unreadable", False)
+            analysis.setdefault("not_visual", False)
+            
+            return self._convert_to_native(analysis)
+            
+        except Exception as e:
+            print(f"    [ERROR] Gemini analysis failed: {str(e)}")
+            return {
+                "visual_id": visual_id,
+                "type": None,
+                "data": {},
+                "summary": f"Analysis error: {str(e)}",
+                "unreadable": True,
+                "not_visual": False
+            }
+    
+    def _is_likely_table(self, crop: np.ndarray) -> bool:
+        """Pre-filter: Check if crop is likely a table"""
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 120)
+        
+        h, w = crop.shape[:2]
+        if h == 0 or w == 0:
+            return False
+        
+        # Check for table-like patterns (grids)
+        text_ratio = np.sum(gray < 200) / (h * w + 1e-12)
+        edge_density = np.sum(edges > 0) / (h * w + 1e-12)
+        
+        # Tables typically have high text ratio and regular edge patterns
+        return text_ratio > 0.5 and edge_density < 0.01
     
     def _get_text_boxes(self, pdf_path: str, page_index: int) -> List[List[int]]:
         """Get text box coordinates from PDF"""
@@ -109,21 +281,18 @@ class ImageDetector:
             doc = fitz.open(pdf_path)
             page = doc.load_page(page_index)
             raw_blocks = page.get_text("blocks")
-            zoom = self.DPI / 72.0
             
             boxes = []
             for b in raw_blocks:
-                x1, y1, x2, y2, text = b[0], b[1], b[2], b[3], b[4]
-                if text and str(text).strip():
-                    boxes.append([
-                        int(x1 * zoom), int(y1 * zoom),
-                        int(x2 * zoom), int(y2 * zoom)
-                    ])
+                if len(b) >= 5:
+                    x1, y1, x2, y2, text = b[0], b[1], b[2], b[3], b[4]
+                    if text and str(text).strip():
+                        boxes.append([int(x1), int(y1), int(x2), int(y2)])
             
             doc.close()
             return boxes
         except Exception as e:
-            print(f"    [!] Error getting text boxes: {e}")
+            print(f"  [!] Error getting text boxes: {e}")
             return []
     
     def _apply_text_mask(
@@ -135,7 +304,7 @@ class ImageDetector:
         mask = np.ones(page_bgr.shape[:2], dtype=np.uint8) * 255
         
         for (x1, y1, x2, y2) in text_boxes:
-            # Add padding around text
+            # Add padding
             pad_x = int((x2 - x1) * 0.02) + 2
             pad_y = int((y2 - y1) * 0.02) + 2
             
@@ -172,71 +341,61 @@ class ImageDetector:
         page_bgr: np.ndarray, 
         mask: np.ndarray
     ) -> List[List[int]]:
-        """Strict detection (original behavior)"""
+        """Strict detection"""
         gray = cv2.cvtColor(page_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.bitwise_and(gray, gray, mask=mask)
+        if mask is not None:
+            gray = cv2.bitwise_and(gray, gray, mask=mask)
         
-        # Adaptive thresholding
         th = cv2.adaptiveThreshold(
             gray, 255, 
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 51, 9
         )
         
-        # Morphological operations to merge nearby regions
         merge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 30))
         merged = cv2.dilate(th, merge_kernel, iterations=2)
         
-        # Find contours
         contours, _ = cv2.findContours(
             merged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
         
         boxes = []
+        h, w = page_bgr.shape[:2]
+        
         for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            area = w * h
+            x, y, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
             
-            # Size filters
-            if area < self.MIN_AREA:
-                continue
-            if w < self.MIN_W or h < self.MIN_H:
+            if area < self.MIN_AREA or bw < self.MIN_W or bh < self.MIN_H:
                 continue
             
-            crop = page_bgr[y:y+h, x:x+w]
+            bbox = [x, y, x + bw, y + bh]
             
-            # Filter out logos and watermarks
-            if self._is_logo(crop):
-                continue
-            if self._is_watermark(crop):
+            if self._is_in_header_footer(bbox, h) or self._is_full_page_detection(bbox, w, h):
                 continue
             
-            # Check if it's a real visual
-            if self._is_real_visual(crop):
-                boxes.append([x, y, x + w, y + h])
+            crop = page_bgr[y:y+bh, x:x+bw]
+            
+            if self._is_logo(crop) or self._is_watermark(crop) or not self._is_real_visual(crop):
+                continue
+            
+            boxes.append(bbox)
         
-        # Merge overlapping boxes
-        boxes = self._merge_boxes(boxes)
-        
-        # Sort top to bottom
-        boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
-        
-        return boxes
+        return self._merge_boxes(boxes)
     
     def _detect_visuals_permissive(
         self, 
         page_bgr: np.ndarray, 
         mask: np.ndarray
     ) -> List[List[int]]:
-        """Permissive detection for difficult visuals (Gantt, faint charts)"""
+        """Permissive detection for difficult visuals"""
         gray = cv2.cvtColor(page_bgr, cv2.COLOR_BGR2GRAY)
         
-        # Relax mask slightly
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        relaxed_mask = cv2.erode(mask, kernel, iterations=1)
-        gray = cv2.bitwise_and(gray, gray, mask=relaxed_mask)
+        if mask is not None:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            relaxed_mask = cv2.erode(mask, kernel, iterations=1)
+            gray = cv2.bitwise_and(gray, gray, mask=relaxed_mask)
         
-        # Smaller kernel for preserving smaller shapes
         th = cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_MEAN_C,
@@ -251,39 +410,51 @@ class ImageDetector:
         )
         
         boxes = []
+        h, w = page_bgr.shape[:2]
+        
         for c in contours:
-            x, y, w, h = cv2.boundingRect(c)
-            area = w * h
+            x, y, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
             
-            # More lenient size filters
-            if area < self.MIN_AREA_PERMISSIVE:
-                continue
-            if w < self.MIN_W_PERMISSIVE or h < self.MIN_H_PERMISSIVE:
+            if area < self.MIN_AREA_PERMISSIVE or bw < self.MIN_W_PERMISSIVE or bh < self.MIN_H_PERMISSIVE:
                 continue
             
-            crop = page_bgr[y:y+h, x:x+w]
+            bbox = [x, y, x + bw, y + bh]
             
-            # Relaxed logo check
-            if self._is_logo(crop) and (w < 220 and h < 220):
+            if self._is_in_header_footer(bbox, h) or self._is_full_page_detection(bbox, w, h):
                 continue
             
-            # Relaxed watermark check
+            crop = page_bgr[y:y+bh, x:x+bw]
+            
+            if self._is_logo(crop) and (bw < 220 and bh < 220):
+                continue
+            
             if self._is_watermark(crop) and area > 200000:
                 continue
             
-            # Permissive visual test
             if self._is_real_visual(
                 crop,
-                edge_thresh=self.EDGE_DENSITY_THRESHOLD_PERMISSIVE,
-                entropy_thresh=self.ENTROPY_THRESHOLD_PERMISSIVE,
-                area_thresh=100000
+                self.EDGE_DENSITY_THRESHOLD_PERMISSIVE,
+                self.ENTROPY_THRESHOLD_PERMISSIVE,
+                100000
             ):
-                boxes.append([x, y, x + w, y + h])
+                boxes.append(bbox)
         
-        boxes = self._merge_boxes(boxes, iou_thresh=0.1)
-        boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
-        
-        return boxes
+        return self._merge_boxes(boxes, iou_thresh=0.1)
+    
+    def _is_in_header_footer(self, bbox: List[int], page_height: int) -> bool:
+        """Check if bbox is in header/footer"""
+        x1, y1, x2, y2 = bbox
+        center_y = (y1 + y2) / 2
+        return center_y < self.HEADER_FOOTER_MARGIN or center_y > (page_height - self.HEADER_FOOTER_MARGIN)
+    
+    def _is_full_page_detection(self, bbox: List[int], page_width: int, page_height: int) -> bool:
+        """Check if bbox covers too much of page"""
+        x1, y1, x2, y2 = bbox
+        bbox_area = (x2 - x1) * (y2 - y1)
+        page_area = page_width * page_height
+        coverage = bbox_area / (page_area + 1e-12)
+        return coverage > self.MAX_PAGE_COVERAGE
     
     def _is_logo(self, crop: np.ndarray) -> bool:
         """Detect if region is a logo"""
@@ -295,10 +466,7 @@ class ImageDetector:
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         entropy = self._shannon_entropy(gray)
         
-        if entropy < 3.0 and (0.5 < ar < 1.8) and (w < 360 and h < 360):
-            return True
-        
-        return False
+        return entropy < 3.0 and (0.5 < ar < 1.8) and (w < 360 and h < 360)
     
     def _is_watermark(self, crop: np.ndarray) -> bool:
         """Detect if region is a watermark"""
@@ -310,11 +478,7 @@ class ImageDetector:
             return False
         
         edge_density = np.sum(edges > 0) / (area + 1e-12)
-        
-        if edge_density < 0.002 and area > 50000:
-            return True
-        
-        return False
+        return edge_density < 0.002 and area > 50000
     
     def _is_real_visual(
         self, 
@@ -339,40 +503,14 @@ class ImageDetector:
         edge_density = np.sum(edges > 0) / (area + 1e-12)
         entropy = self._shannon_entropy(gray)
         
-        if (edge_density > edge_thresh) or (entropy > entropy_thresh) or (area > area_thresh):
-            return True
-        
-        return False
+        return (edge_density > edge_thresh) or (entropy > entropy_thresh) or (area > area_thresh)
     
     def _shannon_entropy(self, gray: np.ndarray) -> float:
-        """Calculate Shannon entropy of grayscale image"""
+        """Calculate Shannon entropy"""
         hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).ravel()
         probs = hist / (hist.sum() + 1e-12)
         probs = probs[probs > 0]
-        return -np.sum(probs * np.log2(probs))
-    
-    def _classify_visual(self, crop: np.ndarray) -> str:
-        """Classify visual type"""
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        
-        # Detect lines
-        lines = cv2.HoughLinesP(
-            edges, 1, np.pi/180, 100,
-            minLineLength=100, maxLineGap=20
-        )
-        
-        if lines is not None:
-            horiz = sum(1 for l in lines if abs(l[0][1] - l[0][3]) < 5)
-            vert = sum(1 for l in lines if abs(l[0][0] - l[0][2]) < 5)
-            
-            if horiz and vert:
-                return "chart"
-            elif horiz > 5:
-                return "gantt"
-            return "diagram"
-        
-        return "image"
+        return -np.sum(probs * np.log2(probs)) if len(probs) > 0 else 0
     
     def _merge_boxes(
         self, 
@@ -400,7 +538,6 @@ class ImageDetector:
             
             remove = []
             for j in idxs:
-                # Calculate IoU
                 xx1 = max(x1[i], x1[j])
                 yy1 = max(y1[i], y1[j])
                 xx2 = min(x2[i], x2[j])
@@ -414,7 +551,6 @@ class ImageDetector:
                 
                 if iou > iou_thresh:
                     remove.append(j)
-                    # Expand bounding box
                     keep[-1][0] = min(keep[-1][0], int(x1[j]))
                     keep[-1][1] = min(keep[-1][1], int(y1[j]))
                     keep[-1][2] = max(keep[-1][2], int(x2[j]))
@@ -423,3 +559,15 @@ class ImageDetector:
             idxs = [k for k in idxs if k not in remove]
         
         return keep
+    
+    def _convert_to_native(self, obj: Any) -> Any:
+        """Convert numpy types to native Python types"""
+        if isinstance(obj, np.generic):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, list):
+            return [self._convert_to_native(x) for x in obj]
+        if isinstance(obj, dict):
+            return {str(k): self._convert_to_native(v) for k, v in obj.items()}
+        return obj

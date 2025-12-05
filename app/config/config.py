@@ -32,14 +32,21 @@ class Config:
     LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
-    # Model Configuration
-    TABLE_DETECTION_MODEL = os.getenv("TABLE_DETECTION_MODEL", "microsoft/table-transformer-detection")
-    TABLE_CONFIDENCE_THRESHOLD = float(os.getenv("TABLE_CONFIDENCE_THRESHOLD", "0.7"))
+    # Database Configuration
+    DB_HOST: str = os.getenv("DB_HOST", "localhost")
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME: str = os.getenv("DB_NAME", "")
+    DB_USER: str = os.getenv("DB_USER", "")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+    AUTH_REQUIRED: bool = os.getenv("AUTH_REQUIRED", "true").lower() == "true"
     
-    # Processing Configuration
-    DEFAULT_CHUNK_SIZE = int(os.getenv("DEFAULT_CHUNK_SIZE", "5"))
-    DEFAULT_OVERLAP = int(os.getenv("DEFAULT_OVERLAP", "1"))
-    
+    @property
+    def DATABASE_URL(self) -> str:
+        """Create properly escaped database URL"""
+        # Escape special characters in password
+        import urllib.parse
+        escaped_password = urllib.parse.quote_plus(self.DB_PASSWORD)
+        return f"postgresql://{self.DB_USER}:{escaped_password}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
     # Create necessary directories
     @classmethod
     def initialize(cls):

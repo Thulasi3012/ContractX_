@@ -10,14 +10,14 @@ PDF Upload
 [Page-by-Page Processing]
     ↓
 ┌────────────────────────────────────────────┐
-│  For Each Page:                             │
-│                                             │
-│  1. TEXT ANALYSIS (Gemini 2.0-flash-exp)  │
+│  For Each Page:                            │
+│                                            │
+│  1. TEXT ANALYSIS (Gemini 2.0-flash-exp)   │
 │     • Sections, clauses, sub-clauses       │
 │     • Entities: buyer, seller, dates       │
-│     • Deadlines, alerts                     │
-│     • NO TABLE CONTENT                      │
-│                                             │
+│     • Deadlines, alerts                    │
+│     • NO TABLE CONTENT                     │
+│                                            │
 │  2. TABLE DETECTION (Multi-Scale)          │
 │     • microsoft/table-transformer          │
 │     • Pass 1: Standard (0.25 threshold)    │
@@ -25,13 +25,13 @@ PDF Upload
 │     • Pass 3: Grayscale (0.22)             │
 │     • Fallback: Edge detection (0.15)      │
 │     • NMS with IoU=0.5                     │
-│                                             │
+│                                            │
 │  3. TABLE EXTRACTION (Gemini)              │
 │     • Complete table structure             │
 │     • Merged cell handling                 │
-│     • Headers + all rows                    │
+│     • Headers + all rows                   │
 │     • Metadata (type, position, size)      │
-│                                             │
+│                                            │
 └────────────────────────────────────────────┘
     ↓
 [Consolidate Results]
@@ -191,7 +191,7 @@ Or open: `http://localhost:8000/docs`
 }
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### DPI Settings
 

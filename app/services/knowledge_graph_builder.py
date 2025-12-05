@@ -1,6 +1,7 @@
 """
 Knowledge Graph Builder for ContractX
 Converts document analysis into Neo4j graph structure
+Uses database UUID for document identification
 """
 
 from neo4j import GraphDatabase
@@ -27,31 +28,22 @@ class KnowledgeGraphBuilder:
         except Exception as e:
             print(f"[ERROR] Neo4j connection failed: {e}")
             self.driver = None
-
-    def _sanitize_value(self, value):
-        """Recursively sanitize values to replace None with empty strings and
-        ensure lists/dicts do not contain None (Neo4j disallows collections
-        containing nulls).
-        """
-        if value is None:
-            return ""
-        if isinstance(value, list):
-            return [self._sanitize_value(v) for v in value]
-        if isinstance(value, dict):
-            return {k: self._sanitize_value(v) for k, v in value.items()}
-        return value
     
     def close(self):
         """Close Neo4j connection"""
         if self.driver:
             self.driver.close()
     
-    def build_graph(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
+    def build_graph(self, document_data: Dict[str, Any], db_document_id: str) -> Dict[str, Any]:
         """
         Build complete knowledge graph from document analysis
         
+        Args:
+            document_data: Extraction results
+            db_document_id: UUID from database (CRITICAL)
+            
         Structure:
-        - Document (root node)
+        - Document (root node with UUID from DB)
           ├─> Page nodes
           │    ├─> Section nodes
           │    │    ├─> Clause nodes
@@ -68,65 +60,81 @@ class KnowledgeGraphBuilder:
                └─> Alert nodes
         """
         if not self.driver:
-            return {"error": "Neo4j not connected"}
+            return {
+                "status": "failed",
+                "error": "Neo4j not connected",
+                "document_id": db_document_id
+            }
         
         print("\n" + "=" * 80)
         print("Building Knowledge Graph")
+        print(f"Document ID: {db_document_id}")
         print("=" * 80)
         
-        with self.driver.session() as session:
-            # Create Document root node
-            doc_id = self._create_document_node(session, document_data)
-            print(f"[OK] Created Document node: {doc_id}")
-            
-            # Create Entity nodes (shared across document)
-            entity_ids = self._create_entity_nodes(session, doc_id, document_data['summary']['entities'])
-            print(f"[OK] Created {len(entity_ids)} entity nodes")
-            
-            # Process each page
-            total_nodes = 0
-            total_relationships = 0
-            
-            for page_data in document_data['pages']:
-                page_num = page_data['page_number']
-                print(f"\n[Page {page_num}] Processing...")
+        try:
+            with self.driver.session() as session:
+                # Create Document root node with database UUID
+                doc_id = self._create_document_node(session, document_data, db_document_id)
+                print(f"[OK] Created Document node: {doc_id}")
                 
-                # Create Page node
-                page_id = self._create_page_node(session, doc_id, page_data)
+                # Create Entity nodes (shared across document)
+                summary = document_data.get('summary', {})
+                entity_ids = self._create_entity_nodes(session, doc_id, summary.get('entities', {}))
+                print(f"[OK] Created {len(entity_ids)} entity nodes")
                 
-                # Create text structure (sections, clauses)
-                text_stats = self._create_text_structure(session, page_id, page_data['text_analysis'])
-                print(f"  - Text: {text_stats['sections']} sections, {text_stats['clauses']} clauses")
+                # Process each page
+                total_nodes = 0
+                total_relationships = 0
                 
-                # Create table nodes
-                table_stats = self._create_table_structure(session, page_id, page_data['tables'])
-                print(f"  - Tables: {table_stats['tables']} tables, {table_stats['rows']} rows")
+                for page_data in document_data.get('pages', []):
+                    page_num = page_data['page_number']
+                    print(f"\n[Page {page_num}] Processing...")
+                    
+                    # Create Page node
+                    page_id = self._create_page_node(session, doc_id, page_data)
+                    
+                    # Create text structure (sections, clauses)
+                    text_stats = self._create_text_structure(session, page_id, page_data.get('text_analysis', {}))
+                    print(f"  - Text: {text_stats['sections']} sections, {text_stats['clauses']} clauses")
+                    
+                    # Create table nodes
+                    table_stats = self._create_table_structure(session, page_id, page_data.get('tables', []))
+                    print(f"  - Tables: {table_stats['tables']} tables, {table_stats['rows']} rows")
+                    
+                    # Create visual nodes
+                    visual_stats = self._create_visual_structure(session, page_id, page_data.get('visuals', []))
+                    print(f"  - Visuals: {visual_stats['visuals']} visuals")
+                    
+                    # Link page entities to global entities
+                    text_analysis = page_data.get('text_analysis', {})
+                    self._link_page_entities(session, page_id, text_analysis.get('entities', {}), entity_ids)
+                    
+                    total_nodes += text_stats['total_nodes'] + table_stats['total_nodes'] + visual_stats['total_nodes']
+                    total_relationships += text_stats['relationships'] + table_stats['relationships'] + visual_stats['relationships']
                 
-                # Create visual nodes
-                visual_stats = self._create_visual_structure(session, page_id, page_data['visuals'])
-                print(f"  - Visuals: {visual_stats['visuals']} visuals")
+                print("\n" + "=" * 80)
+                print("Knowledge Graph Complete")
+                print(f"  Document ID: {db_document_id}")
+                print(f"  Total Nodes: {total_nodes}")
+                print(f"  Total Relationships: {total_relationships}")
+                print("=" * 80)
                 
-                # Link page entities to global entities
-                self._link_page_entities(session, page_id, page_data['text_analysis']['entities'], entity_ids)
-                
-                total_nodes += text_stats['total_nodes'] + table_stats['total_nodes'] + visual_stats['total_nodes']
-                total_relationships += text_stats['relationships'] + table_stats['relationships'] + visual_stats['relationships']
-            
-            print("\n" + "=" * 80)
-            print("Knowledge Graph Complete")
-            print(f"  Total Nodes: {total_nodes}")
-            print(f"  Total Relationships: {total_relationships}")
-            print("=" * 80)
-            
+                return {
+                    "status": "success",
+                    "document_id": db_document_id,
+                    "total_nodes": total_nodes,
+                    "total_relationships": total_relationships
+                }
+        except Exception as e:
+            print(f"[ERROR] Knowledge graph build failed: {e}")
             return {
-                "document_id": doc_id,
-                "total_nodes": total_nodes,
-                "total_relationships": total_relationships,
-                "status": "success"
+                "status": "failed",
+                "error": str(e),
+                "document_id": db_document_id
             }
     
-    def _create_document_node(self, session, doc_data: Dict[str, Any]) -> str:
-        """Create root Document node"""
+    def _create_document_node(self, session, doc_data: Dict[str, Any], db_document_id: str) -> str:
+        """Create root Document node using database UUID"""
         query = """
         CREATE (d:Document {
             id: $doc_id,
@@ -135,28 +143,26 @@ class KnowledgeGraphBuilder:
             total_sections: $total_sections,
             total_tables: $total_tables,
             total_visuals: $total_visuals,
-            created_at: $timestamp,
-            version: $version
+            created_at: $timestamp
         })
         RETURN d.id as doc_id
         """
         
-        doc_id = f"doc_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        summary = doc_data.get('summary', {})
         
         result = session.run(query, {
-            "doc_id": doc_id,
-            "filename": doc_data['filename'],
-            "total_pages": doc_data['total_pages'],
-            "total_sections": doc_data['summary']['total_sections'],
-            "total_tables": doc_data['summary']['total_tables'],
-            "total_visuals": doc_data['summary']['total_visuals'],
-            "timestamp": doc_data['timestamp'],
-            "version": doc_data['metadata']['version']
+            "doc_id": db_document_id,  # Use database UUID
+            "filename": doc_data.get('filename', 'unknown'),
+            "total_pages": doc_data.get('total_pages', 0),
+            "total_sections": summary.get('total_sections', 0),
+            "total_tables": summary.get('total_tables', 0),
+            "total_visuals": summary.get('total_visuals', 0),
+            "timestamp": doc_data.get('timestamp', datetime.now().isoformat())
         })
         
         return result.single()['doc_id']
     
-    def _create_entity_nodes(self, session, doc_id: str, entities: Dict[str, Any]) -> Dict[str, str]:
+    def _create_entity_nodes(self, session, doc_id: str, entities: Dict[str, Any]) -> Dict[str, Any]:
         """Create global entity nodes (Buyer, Seller, Dates, etc.)"""
         entity_ids = {}
         
@@ -283,13 +289,14 @@ class KnowledgeGraphBuilder:
         """
         
         page_id = f"{doc_id}_page_{page_data['page_number']}"
+        text_analysis = page_data.get('text_analysis', {})
         
         result = session.run(query, {
             "page_id": page_id,
             "page_number": page_data['page_number'],
-            "sections_count": page_data['text_analysis']['sections_count'],
-            "tables_count": len(page_data['tables']),
-            "visuals_count": len(page_data['visuals']),
+            "sections_count": text_analysis.get('sections_count', 0),
+            "tables_count": len(page_data.get('tables', [])),
+            "visuals_count": len(page_data.get('visuals', [])),
             "doc_id": doc_id
         })
         
@@ -301,7 +308,7 @@ class KnowledgeGraphBuilder:
         
         for section in text_analysis.get('sections', []):
             # Create Section node
-            section_id = f"{page_id}_section_{section['heading_id']}"
+            section_id = f"{page_id}_section_{section.get('heading_id', 'unknown')}"
             query = """
             CREATE (s:Section {
                 id: $section_id,
@@ -315,8 +322,8 @@ class KnowledgeGraphBuilder:
             """
             session.run(query, {
                 "section_id": section_id,
-                "heading": section['heading'],
-                "heading_id": section['heading_id'],
+                "heading": section.get('heading', ''),
+                "heading_id": section.get('heading_id', 'unknown'),
                 "page_id": page_id
             })
             stats['sections'] += 1
@@ -325,7 +332,7 @@ class KnowledgeGraphBuilder:
             
             # Create Clauses under Section
             for clause in section.get('clauses', []):
-                clause_id = f"{section_id}_clause_{clause['clause_id']}"
+                clause_id = f"{section_id}_clause_{clause.get('clause_id', 'unknown')}"
                 query = """
                 CREATE (c:Clause {
                     id: $clause_id,
@@ -339,8 +346,8 @@ class KnowledgeGraphBuilder:
                 """
                 session.run(query, {
                     "clause_id": clause_id,
-                    "text": clause['clause'],
-                    "clause_id_val": clause['clause_id'],
+                    "text": clause.get('clause', ''),
+                    "clause_id_val": clause.get('clause_id', 'unknown'),
                     "section_id": section_id
                 })
                 stats['clauses'] += 1
@@ -349,7 +356,7 @@ class KnowledgeGraphBuilder:
                 
                 # Create SubClauses
                 for sub_clause in clause.get('sub_clauses', []):
-                    sub_clause_id = f"{clause_id}_subclause_{sub_clause['sub_clause_id']}"
+                    sub_clause_id = f"{clause_id}_subclause_{sub_clause.get('sub_clause_id', 'unknown')}"
                     query = """
                     CREATE (sc:SubClause {
                         id: $sub_clause_id,
@@ -362,8 +369,8 @@ class KnowledgeGraphBuilder:
                     """
                     session.run(query, {
                         "sub_clause_id": sub_clause_id,
-                        "text": sub_clause['sub_clause'],
-                        "sub_clause_id_val": sub_clause['sub_clause_id'],
+                        "text": sub_clause.get('sub_clause', ''),
+                        "sub_clause_id_val": sub_clause.get('sub_clause_id', 'unknown'),
                         "clause_id": clause_id
                     })
                     stats['sub_clauses'] += 1
@@ -378,7 +385,7 @@ class KnowledgeGraphBuilder:
         
         for table in tables:
             # Create Table node
-            table_id = f"{page_id}_{table['table_id']}"
+            table_id = f"{page_id}_{table.get('table_id', 'unknown')}"
             query = """
             CREATE (t:Table {
                 id: $table_id,
@@ -387,9 +394,7 @@ class KnowledgeGraphBuilder:
                 table_type: $table_type,
                 rows: $rows,
                 columns: $columns,
-                has_merged_cells: $has_merged_cells,
-                position: $position,
-                size: $size
+                has_merged_cells: $has_merged_cells
             })
             WITH t
             MATCH (p:Page {id: $page_id})
@@ -398,14 +403,12 @@ class KnowledgeGraphBuilder:
             """
             session.run(query, {
                 "table_id": table_id,
-                "table_id_val": table['table_id'],
+                "table_id_val": table.get('table_id', 'unknown'),
                 "title": table.get('table_title', ''),
                 "table_type": table.get('table_type', 'unknown'),
-                "rows": table['total_rows'],
-                "columns": table['total_columns'],
+                "rows": table.get('total_rows', 0),
+                "columns": table.get('total_columns', 0),
                 "has_merged_cells": table.get('has_merged_cells', False),
-                "position": table.get('position', 'unknown'),
-                "size": table.get('size', 'unknown'),
                 "page_id": page_id
             })
             stats['tables'] += 1
@@ -456,33 +459,6 @@ class KnowledgeGraphBuilder:
                 stats['rows'] += 1
                 stats['total_nodes'] += 1
                 stats['relationships'] += 1
-                
-                # Create Cells for this row
-                for col_idx, cell_value in enumerate(row_data):
-                    cell_id = f"{row_id}_cell_{col_idx}"
-                    header_name = table['headers'][col_idx] if col_idx < len(table.get('headers', [])) else f"col_{col_idx}"
-                    
-                    query = """
-                    CREATE (c:TableCell {
-                        id: $cell_id,
-                        column_index: $col_idx,
-                        column_name: $header_name,
-                        value: $value
-                    })
-                    WITH c
-                    MATCH (r:TableRow {id: $row_id})
-                    CREATE (r)-[:HAS_CELL]->(c)
-                    """
-                    session.run(query, {
-                        "cell_id": cell_id,
-                        "col_idx": col_idx,
-                        "header_name": header_name,
-                        "value": str(cell_value),
-                        "row_id": row_id
-                    })
-                    stats['cells'] += 1
-                    stats['total_nodes'] += 1
-                    stats['relationships'] += 1
         
         return stats
     
@@ -491,13 +467,12 @@ class KnowledgeGraphBuilder:
         stats = {"visuals": 0, "total_nodes": 0, "relationships": 0}
         
         for visual in visuals:
-            visual_id = f"{page_id}_{visual['visual_id']}"
+            visual_id = f"{page_id}_{visual.get('visual_id', 'unknown')}"
             query = """
             CREATE (v:Visual {
                 id: $visual_id,
                 visual_id: $visual_id_val,
                 type: $type,
-                bbox: $bbox,
                 width: $width,
                 height: $height,
                 area: $area
@@ -510,12 +485,11 @@ class KnowledgeGraphBuilder:
             try:
                 session.run(query, {
                     "visual_id": visual_id,
-                    "visual_id_val": visual['visual_id'],
-                    "type": visual['type'],
-                    "bbox": visual['bbox'],
-                    "width": visual['width'],
-                    "height": visual['height'],
-                    "area": visual['area'],
+                    "visual_id_val": visual.get('visual_id', 'unknown'),
+                    "type": visual.get('type', 'unknown'),
+                    "width": visual.get('width', 0),
+                    "height": visual.get('height', 0),
+                    "area": visual.get('area', 0),
                     "page_id": page_id
                 })
                 stats['visuals'] += 1
@@ -545,16 +519,6 @@ class KnowledgeGraphBuilder:
             CREATE (p)-[:MENTIONS_SELLER]->(e)
             """
             session.run(query, {"page_id": page_id, "entity_id": global_entity_ids['seller']})
-        
-        # Link to Dates
-        for date_str in page_entities.get('dates', []):
-            for entity_id in global_entity_ids.get('dates', []):
-                query = """
-                MATCH (p:Page {id: $page_id})
-                MATCH (e:Date {id: $entity_id, value: $date_value})
-                CREATE (p)-[:MENTIONS_DATE]->(e)
-                """
-                session.run(query, {"page_id": page_id, "entity_id": entity_id, "date_value": date_str})
     
     def query_graph(self, cypher_query: str) -> List[Dict[str, Any]]:
         """Execute Cypher query on graph"""
@@ -573,3 +537,55 @@ class KnowledgeGraphBuilder:
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
             print("[OK] Graph cleared")
+    
+    def delete_document(self, document_id: str) -> bool:
+        """
+        Delete entire document and all related nodes from Knowledge Graph
+        
+        Args:
+            document_id: UUID of document to delete
+            
+        Returns:
+            Success status
+        """
+        if not self.driver:
+            print(f"[KG ERROR] Neo4j not connected")
+            return False
+        
+        try:
+            with self.driver.session() as session:
+                # Query to find and delete all nodes related to this document
+                query = """
+                MATCH (d:Document {id: $doc_id})
+                DETACH DELETE d
+                RETURN COUNT(*) as deleted_count
+                """
+                
+                result = session.run(query, {"doc_id": document_id})
+                deleted = result.single()
+                
+                if deleted and deleted['deleted_count'] > 0:
+                    print(f"[OK] Deleted document from KG: {document_id}")
+                    
+                    # Also delete orphaned entity nodes if they're not connected to other documents
+                    cleanup_query = """
+                    MATCH (e:Entity)
+                    WHERE NOT (e)<--(:Document)
+                    DETACH DELETE e
+                    RETURN COUNT(*) as cleaned_count
+                    """
+                    
+                    cleanup_result = session.run(cleanup_query)
+                    cleanup_count = cleanup_result.single()['cleaned_count']
+                    
+                    if cleanup_count > 0:
+                        print(f"[OK] Cleaned up {cleanup_count} orphaned entity nodes")
+                    
+                    return True
+                else:
+                    print(f"[WARNING] Document not found in KG: {document_id}")
+                    return False
+                    
+        except Exception as e:
+            print(f"[KG ERROR] Failed to delete document from KG: {e}")
+            return False
