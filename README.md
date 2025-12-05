@@ -97,8 +97,23 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Step 4: Install System Dependencies
 
-### Step 4: Environment Configuration
+**Windows:**
+- Download Poppler from: https://github.com/oschwartz10612/poppler-windows/releases
+- Extract and add to PATH
+
+**macOS:**
+```bash
+brew install poppler
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install poppler-utils
+```
+
+### Step 5: Environment Configuration
 
 Create `.env` file in project root:
 
@@ -258,7 +273,7 @@ ContractX/
               │  (Async, Parallel Processing)  │
               └────┬─────────────┬─────────────┬┘
                    │             │             │
-        ┌──────────▼──┐  ┌────────▼──┐  ┌────────▼──┐
+        ┌──────────▼─┐  ┌────────▼──┐  ┌────────▼──┐
         │TEXT ANALYSIS│  │TABLE      │  │VISUAL     │
         │             │  │DETECTION  │  │DETECTION  │
         │ - Sections  │  │           │  │           │
@@ -744,6 +759,7 @@ print(f"Answer: {answer['answer']}")
 search_results = search_document(doc_id, "payment terms")
 print(f"Found {len(search_results)} chunks")
 ```
+
 
 ### cURL Examples
 
