@@ -1,0 +1,29 @@
+# FastAPI
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-multipart==0.0.6
+
+# PDF Processing
+PyMuPDF==1.23.8
+pdf2image==1.17.0
+Pillow==10.2.0
+PyMuPDF
+neo4j
+# Computer Vision (for image detection)
+opencv-python==4.8.1.78
+numpy==1.24.3
+
+# AI/ML
+google-generativeai==0.3.2
+transformers==4.36.2
+torch==2.1.2
+torchvision==0.16.2
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0
+
+# Note: pdf2image requires poppler-utils
+# Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases
+# Linux: sudo apt-get install poppler-utils
+# Mac: brew install poppler
