@@ -29,6 +29,19 @@ class KnowledgeGraphBuilder:
             print(f"[ERROR] Neo4j connection failed: {e}")
             self.driver = None
     
+    def _clean_nulls(self, obj: Any) -> Any:
+        """Remove None/null values from arrays and dicts for Neo4j compatibility"""
+        if isinstance(obj, list):
+            # Remove None values and convert to strings
+            return [str(item) if item is not None else "" for item in obj if item is not None]
+        elif isinstance(obj, dict):
+            # Remove keys with None values
+            return {k: self._clean_nulls(v) for k, v in obj.items() if v is not None}
+        elif obj is None:
+            return ""
+        else:
+            return obj
+    
     def close(self):
         """Close Neo4j connection"""
         if self.driver:
@@ -209,6 +222,8 @@ class KnowledgeGraphBuilder:
         # Date nodes
         entity_ids['dates'] = []
         for idx, date_str in enumerate(entities.get('dates', []), 1):
+            if not date_str or date_str is None:
+                continue
             query = """
             CREATE (e:Entity:Date {
                 id: $entity_id,
@@ -222,7 +237,7 @@ class KnowledgeGraphBuilder:
             """
             result = session.run(query, {
                 "entity_id": f"{doc_id}_date_{idx}",
-                "date_value": date_str,
+                "date_value": str(date_str),
                 "doc_id": doc_id
             })
             entity_ids['dates'].append(result.single()['entity_id'])
@@ -230,6 +245,8 @@ class KnowledgeGraphBuilder:
         # Deadline nodes
         entity_ids['deadlines'] = []
         for idx, deadline_str in enumerate(entities.get('deadlines', []), 1):
+            if not deadline_str or deadline_str is None:
+                continue
             query = """
             CREATE (e:Entity:Deadline {
                 id: $entity_id,
@@ -243,7 +260,7 @@ class KnowledgeGraphBuilder:
             """
             result = session.run(query, {
                 "entity_id": f"{doc_id}_deadline_{idx}",
-                "deadline_value": deadline_str,
+                "deadline_value": str(deadline_str),
                 "doc_id": doc_id
             })
             entity_ids['deadlines'].append(result.single()['entity_id'])
@@ -251,6 +268,8 @@ class KnowledgeGraphBuilder:
         # Alert nodes
         entity_ids['alerts'] = []
         for idx, alert_str in enumerate(entities.get('alerts', []), 1):
+            if not alert_str or alert_str is None:
+                continue
             query = """
             CREATE (e:Entity:Alert {
                 id: $entity_id,
@@ -265,7 +284,7 @@ class KnowledgeGraphBuilder:
             """
             result = session.run(query, {
                 "entity_id": f"{doc_id}_alert_{idx}",
-                "alert_value": alert_str,
+                "alert_value": str(alert_str),
                 "doc_id": doc_id
             })
             entity_ids['alerts'].append(result.single()['entity_id'])
@@ -428,9 +447,11 @@ class KnowledgeGraphBuilder:
                 MATCH (t:Table {id: $table_id})
                 CREATE (t)-[:HAS_HEADER]->(h)
                 """
+                # Clean null values from headers
+                clean_headers = self._clean_nulls(table['headers'])
                 session.run(query, {
                     "header_id": header_id,
-                    "values": table['headers'],
+                    "values": clean_headers,
                     "table_id": table_id
                 })
                 stats['rows'] += 1
@@ -450,10 +471,12 @@ class KnowledgeGraphBuilder:
                 MATCH (t:Table {id: $table_id})
                 CREATE (t)-[:HAS_ROW]->(r)
                 """
+                # Clean null values from row data
+                clean_row_data = self._clean_nulls(row_data)
                 session.run(query, {
                     "row_id": row_id,
                     "row_index": row_idx,
-                    "values": row_data,
+                    "values": clean_row_data,
                     "table_id": table_id
                 })
                 stats['rows'] += 1

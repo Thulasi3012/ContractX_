@@ -91,133 +91,294 @@ class TextAnalyzer:
         return self._empty_result(page_number, text)
     
     def _create_prompt(self, page_number: int, text: str) -> str:
-        """Create detailed prompt for Gemini - TEXT ONLY EXTRACTION"""
+        """
+        Create detailed prompt for Gemini
+        NO HALLUCINATED HEADINGS - NO FAKE IDs - NO BROKEN ADDRESSES
+        """
         
-        prompt = f"""You are an expert document analyzer specializing in legal contracts and business documents. 
-
-⚠️ CRITICAL INSTRUCTION: Analyze ONLY the plain text, paragraphs, and textual content. 
-⚠️ DO NOT extract or process content from TABLES or IMAGES.
-⚠️ Simply DETECT if tables/images are present, but don't extract their content.
+        prompt = f"""You are a precision document extraction system. Extract EXACTLY what is in the PDF.
 
 PAGE {page_number}:
-{text[:5000]}
+{text[:6000]}
 
-**YOUR TASK:**
+═════════════════════════════════════════════════════════════════════════════════
 
-1. **Extract Document Structure (TEXT ONLY):**
-   - Identify headings, sub-headings, clauses, and sub-clauses from PLAIN TEXT
-   - SKIP any content that appears in table format
-   - Assign hierarchical IDs (heading_id: 1, sub_heading_id: 1.1, clause_id: 1.1.1)
-   - Preserve exact text from paragraphs and text blocks only
+⚠️ CRITICAL RULES - FOLLOW 100% STRICTLY:
 
-2. **Detect Tables (DO NOT EXTRACT CONTENT):**
-   - DO NOT extract table data, headers, or cell contents
-   - don't describe table content
+1. **Extract ALL Headings (including small/footer text):**
+   ✓ Main section headings (bold, large)
+   ✓ Sub-section headings (smaller)
+   ✓ Page headers ("Confidential", "Page X of Y")
+   ✓ Contact email lines (e.g., "christopher.tapping@thomsonreuters.com")
+   ✓ Footer text lines
+   ✓ Standalone single-line text boxes
+   ✓ Tiny/small font headings that might be easy to miss
+   ✗ DO NOT skip any heading just because it's small
+
+2. **Extract ALL Lines of Text Without Skipping:**
+   ✓ Long paragraphs
+   ✓ Short one-line statements (e.g., "Thank you.")
+   ✓ Small font text
+   ✓ Isolated footer/header lines
+   ✓ Contact information
+   ✓ Disclaimers and notes
+   ✗ NEVER omit text because it appears small or isolated
+
+3. **Handle Bullet Lists and Enumerations:**
+   ✓ Each bullet point = separate item (NOT merged into one heading)
+   ✓ Example: If text shows:
+      • Alteryx
+      • Experian
+      • K-1 Analyzer
+     Then extract 3 separate sub_headings, NOT one combined heading
+   ✓ Preserve exact bullet formatting
+   ✗ NEVER merge multiple bullets into one
+
+4. **Preserve Numeric Values EXACTLY:**
+   ✓ Extract numbers, Ammount ,Price, IDs, order codes EXACTLY as printed
+   ✓ Example: Order ID "Q-01020320" must be "Q-01020320" not "Q-01020330"
+   ✓ If unsure, leave empty—NEVER guess or modify numbers
+   ✗ NEVER hallucinate or change numeric values
+
+5. **Extract Text Content EXACTLY:**
+   ✓ Preserve exact wording, spacing, capitalization, punctuation
+   ✓ Keep abbreviations as-is
+   ✓ Keep acronyms as-is
+   ✗ NEVER reword, simplify, or modify text
+
+6. **Table Detection (DO NOT EXTRACT TABLE DATA):**
+   ✓ Detect if tables exist on page
+   ✓ Count tables
+   ✗ DO NOT extract table cell contents, headers, or row data
+
+7. **Entity Extraction (FROM TEXT ONLY):**
+   ✓ Buyer/Seller names from paragraphs
+   ✓ Dates from text (e.g., "3/27/2021", "January 1, 2024")
+   ✓ Deadlines from text (e.g., "within 12 months","Payment due within 30 days")
+   ✓ Addresses from text paragraphs
+   ✓ Email addresses from text
+   ✓ Phone numbers from text
+
+8. **Image/Visual Detection:**
+   ✓ Only mark as visual if it contains actual image/diagram content
+   ✗ NEVER mark plain text boxes as visuals
+   ✗ Text that appears in boxes is still TEXT, not visual 
+
+9. **HEADINGS vs PARAGRAPHS - STRICT DISTINCTION:**
+   ✓ HEADING: Bold/large text that acts as a section title
+     • "Account Address"
+     • "Terms and Conditions"
+     • "Miscellaneous"
+   ✓ PARAGRAPH/CONTENT: Normal sentences and continuous text
+     • "This Order Form, once accepted by Thomson Reuters..."
+     • Address blocks (multi-line)
+     • Descriptions and explanations
+   ✗ NEVER classify normal text as a heading
+   ✗ NEVER split an address block into multiple fake headings
+
+10. **ADDRESS BLOCKS - KEEP THEM TOGETHER:**
+   ✓ If you see a multi-line address block:
+     Account #: 12345
+     Huafon INTL Biomaterials LLC
+     1105 N MARKET ST FL 11
+     WILMINGTON, DE 19801-1216 US
    
-3. **Detect Images (DO NOT EXTRACT CONTENT):**
-   - DO NOT describe image content
+   CORRECT OUTPUT:
+   {{
+     "heading": "Account Address",
+     "content": "Account #: 12345\\nHuafon INTL Biomaterials LLC\\n1105 N MARKET ST FL 11\\nWILMINGTON, DE 19801-1216 US"
+   }}
+   
+   ✗ WRONG (DO NOT DO THIS):
+   {{
+     "sub_heading": "Huafon INTL Biomaterials LLC",
+     "sub_heading_id": "1.1"
+   }},
+   {{
+     "sub_heading": "1105 N MARKET ST FL 11",
+     "sub_heading_id": "1.2"
+   }}
+   
+   ✗ NEVER break an address into multiple sub-headings
+   ✗ NEVER assign fake IDs to address lines
 
-4. **Extract Entities (FROM TEXT ONLY):**
-   - Buyer name(s) and seller name(s) from paragraphs
-   - All dates mentioned in text
-   - Important deadlines from text
-   - Addresses from text
-   - Alert items or critical clauses from text
-   - Objection level or risk level from text
-   - DO NOT extract entities from within tables
+11. **HEADING IDs - ONLY IF EXPLICITLY IN DOCUMENT:**
+   ✓ Extract heading_id ONLY if the document explicitly shows numbering like:
+     "1. Introduction"
+     "2. Terms"
+     "3. Conditions"
+   ✓ Preserve exact numbering as shown
+   
+   CORRECT OUTPUT:
+   {{
+     "heading": "Introduction",
+     "heading_id": "1",
+     "content": "..."
+   }}
+   
+   ✗ WRONG (DO NOT AUTO-GENERATE):
+   {{
+     "heading": "Introduction",
+     "heading_id": "1",  ← HALLUCINATED! Document has no numbering
+     "content": "..."
+   }}
+   
+   ✓ IF NO NUMBERING IN DOCUMENT: Omit heading_id entirely
+   {{
+     "heading": "Introduction",
+     "content": "..."
+   }}
+*NOTE* : Do NOT classify "Page X of Y" as a heading.  
+Treat it as footer text and place it under "content" of the nearest section.
 
-**WHAT TO SKIP:**
-- Any content organized in rows and columns (tables)
-- Any content within table structures
-- Image descriptions or captions within images
-- Numerical data organized in tabular format
-- headers and footers that are part of page layout
+12. **NO SUB-HEADINGS WITHOUT VISUAL SEPARATION:**
+   ✓ Use sub-headings ONLY if there are clearly separate, visually distinct sections
+   ✓ Each sub-heading should be bold/indented/visually distinct
+   *Example:* 1.1 Service A
+               1.2 Service B
+               1.3 Service C
+   
+   ✗ NEVER create sub-headings from:
+     • Bullet points that are just list items
+     • Names in an address block
+     • Sequential lines of continuous text
+     • Part of a longer paragraph
+   
+   ✓ CORRECT - Bullet items should be in "content" under a single heading:
+   {{
+     "heading": "Services Provided",
+     "content": "• Service A\\n• Service B\\n• Service C"
+   }}
+   
+   ✗ WRONG - DO NOT CREATE SUB-HEADINGS:
+   {{
+     "sub_heading": "Service A",
+     "sub_heading_id": "1.1"
+   }},
+   {{
+     "sub_heading": "Service B",
+     "sub_heading_id": "1.2"
+   }}
 
-**WHAT TO EXTRACT:**
-- Headings and section titles
-- Paragraph text
-- Numbered or bulleted lists (as text)
-- Definitions and clauses written as prose
-- Names, dates, and entities from plain text
+13. **CLAUSES - ONLY ACTUAL CONTRACT LANGUAGE:**
+   ✓ Extract clauses from legal contract sections
+   ✓ Clauses should be substantial legal text, not single lines
+   Example:
+   clause_id: "2.1"
+   clause_content : "The Buyer agrees to pay the Seller within 30 days of invoice receipt..."
 
-**OUTPUT FORMAT:**
+   ✗ DO NOT create clauses from:
+     • Addresses
+     • Names
+     • Contact information
+     • Single descriptive lines
 
-Return ONLY a valid JSON object (no markdown, no explanations):
+═════════════════════════════════════════════════════════════════════════════════
+
+**OUTPUT FORMAT - NO HALLUCINATIONS:**
+
+Return ONLY valid JSON (no markdown):
 
 {{
   "sections": [
     {{
-      "heading": "Section heading text from paragraphs",
-      "heading_id": "1",
-      "sub_headings": [
+      "heading": "Section Title OR null",
+      "content": "Full text content (addresses, paragraphs, etc.)",
+      "subsections": [
         {{
-          "sub_heading": "Sub-heading text from paragraphs",
-          "sub_heading_id": "1.1",
-          "clauses": [
-            {{
-              "clause": "Clause text from paragraphs",
-              "clause_id": "1.1.1",
-              "sub_clauses": [
-                {{
-                  "sub_clause": "Sub-clause text",
-                  "sub_clause_id": "1.1.1.1"
-                }}
-              ]
-            }}
-          ]
+          "heading": "Sub-section title (only if visually distinct)",
+          "content": "Content text"
+        }}
+      ],
+      "clauses": [
+        {{
+          "clause_id": "1.1 (only if in document)",
+          "clause": "Full clause text from contract"
         }}
       ]
     }}
   ],
-  "summary": "A detailed summary of the document text only who is the buyer, seller, important dates, deadlines mentioned in the text and is there any risk or objection level mentioned in the text and amount of tables present in the document or any important alert mentioned in the text. **note** the summary should be in text format only not in json format and short and precise",
+  "summary": "Concise summary: Who is buyer/seller, important dates, deadlines, alerts, and count of tables. Keep to 2-3 sentences max.",
   "entities": {{
-    "document_type": "Type of document (Contract, Agreement, Invoice, Lease, Purchase Order, Loan Agreement, etc.) extracted from TEXT ONLY",
-    
-    "buyer_name": "Buyer / Client / Purchaser extracted from TEXT ONLY or null",
-    "seller_name": "Seller / Provider / Contractor extracted from TEXT ONLY or null",
-    
-    "addresses": ["All postal addresses mentioned in the text"],
-    "dates": ["All important dates found in the text"],
-    "deadlines": ["All deadlines, due dates, expiry dates"],
-    
-    "alerts": ["All risk points or critical issues from the document"],
-    
+    "document_type": "Type (Order Form, Agreement, Invoice, etc.) from TEXT",
+    "buyer_name": "Buyer/Client name from text or null",
+    "seller_name": "Seller/Provider name from text or null",
+    "addresses": ["All postal addresses from text"],
+    "dates": ["All dates mentioned in text (e.g., '3/27/2021')"],
+    "deadlines": ["All deadlines/due dates from text"],
+    "alerts": ["Risk points, important warnings from text"],
     "obligations": [
-        {{
-            "party": "Buyer / Seller / Third Party",
-            "description": "The obligation / responsibility extracted from the text",
-            "page": "page number if available"
-        }}
+      {{
+        "party": "Who has obligation",
+        "description": "What they must do"
+      }}
     ],
-    
-    "payment_terms": "Extract payment terms if available",
-    "contract_effective_date": "Start date of contract if available",
-    "contract_end_date": "End/termination date if available"
+    "payment_terms": "Payment text or null",
+    "contract_effective_date": "Start date or null",
+    "contract_end_date": "End date or null"
   }}
 }}
 
-**EXAMPLE:**
+═════════════════════════════════════════════════════════════════════════════════
 
-If the document has:
-- A title "SERVICE AGREEMENT" 
-- A paragraph "This agreement is between Buyer Corp and Seller Inc effective January 1, 2024"
-- A pricing table with 10 rows
-- An appendix section
+**CRITICAL EXAMPLES:**
 
-Your output should extract:
-- The title and paragraph text
-- Detect that a table exists (contains_table: true, count: 1)
-- Extract "Buyer Corp" and "Seller Inc" from the paragraph
-- Extract "January 1, 2024" from the paragraph
-- Extract appendix section heading
-- BUT NOT extract any data from the pricing table itself
 
-**CRITICAL REMINDER:** 
-- Extract structure and entities from TEXT ONLY
-- Do NOT process table content
-- Do NOT process image content
-- Just DETECT if tables/images exist
-- Return ONLY the JSON object"""
+❌ WRONG - Hallucinated heading IDs and broken address:
+{{
+  "heading": "Account Address",
+  "heading_id": "2",  ← NO, not in document
+  "subsections": [
+    {{
+      "heading": "Huafon INTL Biomaterials LLC",
+      "heading_id": "2.1"  ← NO, this is an address line!
+    }},
+    {{
+      "heading": "1105 N MARKET ST FL 11",
+      "heading_id": "2.2"  ← NO, hallucinated!
+    }}
+  ]
+}}
+
+✅ CORRECT - Keep address together, no fake IDs:
+{{
+  "heading": "Account Address",
+  "content": "Account #: 12345\\nHuafon INTL Biomaterials LLC\\n1105 N MARKET ST FL 11\\nWILMINGTON, DE 19801-1216 US"
+}}
+
+❌ WRONG - Paragraph classified as heading:
+{{
+  "heading": "This Order Form, once accepted by Thomson Reuters...",
+  "content": ""
+}}
+
+✅ CORRECT - Paragraph should be content, not heading:
+{{
+  "heading": null,
+  "content": "This Order Form, once accepted by Thomson Reuters, constitutes a binding agreement..."
+}}
+
+❌ WRONG - Bullet items as fake sub-headings:
+{{
+  "subsections": [
+    {{"heading": "Alteryx", "heading_id": "1.1"}},
+    {{"heading": "Experian", "heading_id": "1.2"}},
+    {{"heading": "K-1 Analyzer", "heading_id": "1.3"}}
+  ]
+}}
+
+✅ CORRECT - Bullets in content:
+{{
+  "heading": "Available Data Sets",
+  "content": "• Alteryx\\n• Experian\\n• K-1 Analyzer"
+}}
+
+═════════════════════════════════════════════════════════════════════════════════
+
+NOW: Extract this page EXACTLY following ALL rules above.
+NEVER hallucinate headings, IDs, or structure.
+NEVER break addresses or names into fake sub-headings.
+Return ONLY the JSON object."""
 
         return prompt
     
@@ -232,21 +393,23 @@ Your output should extract:
         buyer = entities.get('buyer_name')
         seller = entities.get('seller_name')
         if buyer and seller:
-            summary_parts.append(f"Agreement between buyer {buyer} and seller {seller}.")
+            summary_parts.append(f"Agreement between {buyer} (buyer) and {seller} (seller).")
         elif buyer:
-            summary_parts.append(f"Buyer: {buyer}.")
+            summary_parts.append(f"Document for buyer: {buyer}.")
         elif seller:
-            summary_parts.append(f"Seller: {seller}.")
+            summary_parts.append(f"Document from seller: {seller}.")
         
         # Dates
         dates = entities.get('dates', [])
         if dates:
-            summary_parts.append(f"Key dates: {', '.join(dates[:3])}.")
+            date_str = ', '.join([str(d) for d in dates if d][:3])
+            summary_parts.append(f"Key dates: {date_str}.")
         
         # Deadlines
         deadlines = entities.get('deadlines', [])
         if deadlines:
-            summary_parts.append(f"Deadlines: {', '.join(deadlines[:2])}.")
+            deadline_str = ', '.join([str(d) for d in deadlines if d][:2])
+            summary_parts.append(f"Deadlines: {deadline_str}.")
         
         # Sections
         if sections:
@@ -255,14 +418,10 @@ Your output should extract:
         # Alerts
         alerts = entities.get('alerts', [])
         if alerts:
-            summary_parts.append(f"Important alerts: {', '.join(alerts[:2])}.")
+            alert_str = ', '.join([str(a) for a in alerts if a][:2])
+            summary_parts.append(f"Important alerts: {alert_str}.")
         
-        # Risk level
-        risk = entities.get('objection_level')
-        if risk:
-            summary_parts.append(f"Risk level: {risk}.")
-        
-        return ' '.join(summary_parts) if summary_parts else "Page contains textual content."
+        return ' '.join(summary_parts) if summary_parts else "Page contains document text."
     
     def _empty_result(self, page_number: int, text: str = "") -> Dict[str, Any]:
         """Empty result on failure with fallback summary"""
@@ -270,15 +429,19 @@ Your output should extract:
             "page_number": page_number,
             "sections": [],
             "sections_count": 0,
-            "summary": f"Page {page_number}: Analysis failed. Text preview: {text[:100]}..." if text else f"Page {page_number}: Analysis failed.",
+            "summary": f"Page {page_number}: Analysis failed. Preview: {text[:100]}..." if text else f"Page {page_number}: Analysis failed.",
             "entities": {
+                "document_type": None,
                 "buyer_name": None,
                 "seller_name": None,
-                "objection_level": None,
                 "dates": [],
                 "deadlines": [],
                 "alerts": [],
-                "addresses": []
+                "obligations": [],
+                "addresses": [],
+                "payment_terms": None,
+                "contract_effective_date": None,
+                "contract_end_date": None
             },
             "error": "Analysis failed"
         }
