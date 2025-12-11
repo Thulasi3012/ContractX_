@@ -1,0 +1,45 @@
+# FastAPI
+fastapi
+uvicorn
+python-multipart
+
+# Database
+sqlalchemy
+psycopg2 
+
+# PDF Processing
+PyMuPDF
+pdf2image
+Pillow
+
+# Neo4j Driver
+neo4j
+
+# Computer Vision (for image detection)
+opencv-python
+numpy
+
+# AI/ML
+google-generativeai
+transformers
+torch
+torchvision
+
+# Utilities
+python-dotenv
+requests
+
+#for Rag 
+qdrant-client 
+sentence-transformers
+
+
+# Note: pdf2image requires poppler-utils
+# Windows: Download from https://github.com/oschwartz10612/poppler-windows/releases
+# Linux: sudo apt-get install poppler-utils
+# Mac: brew install poppler
+
+# Additional dependencies may be required based on specific use cases.
+#install docker for qdrant 
+# To run Qdrant locally using Docker, use the following command:
+# docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
