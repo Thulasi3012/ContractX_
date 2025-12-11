@@ -2099,29 +2099,13 @@ docker volume inspect contractx_qdrant_data
 ```
 
 ---
-
-## Support & Contribution
-
-For issues, questions, or contributions:
-- **GitHub Issues**: https://github.com/yourusername/ContractX/issues
-- **Email**: support@yourcompany.com
-- **Documentation**: See AUDIT_REPORT.md
-
----
-
-## License
-
-MIT License - See LICENSE file for details
-
----
-
 ## Version History
 
 - **v4.0.0** (Current) - Full pipeline with chatbot, RAG, KG, DB, visual summaries
 - **v3.5.0** - Image detection with Gemini analysis
 - **v3.0.0** - Advanced table detection
 - **v2.0.0** - Image detection added
-- **v1.0.0** - Initial release
+- **v1.0.0** - Initial release for text
 
 ---
 
