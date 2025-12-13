@@ -5,7 +5,7 @@ python-multipart
 
 # Database
 sqlalchemy
-psycopg2 
+psycopg2-binary
 
 # PDF Processing
 PyMuPDF
