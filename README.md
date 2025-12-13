@@ -181,7 +181,7 @@ RETRY_DELAY=60
 EXPONENTIAL_BACKOFF=true
 
 # ========================================
-# DATABASE CONFIGURATION (PostgreSQL)
+# DATABASE CONFIGURATION     (PostgreSQL)
 # ========================================
 DB_HOST=localhost
 DB_PORT=5432

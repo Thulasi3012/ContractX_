@@ -105,9 +105,11 @@ logger = logging.getLogger(__name__)
 
 # Table extraction instruction prompt
 INSTRUCTION_TEXT = """TABLE EXTRACTION (COMPLETE STRUCTURE)
-═══════════════════════════════════════════════════════════════════════════════
+CONSIDER THE ATTACHMENT AS A MAINFRAME SPOOL REPORT GENERATED FROM JCL AS A PDS FILE AND EXTRACT THE SAME AS PER THE BELOW PROMPT. SOME ROWS MAY CONTAIN A NOTATION BEFORE EACH ROW (EXAMPLE. "R"), KEEP THAT AS A SEPERATE ROW LEVEL ATTRIBUTE.
+SAME THING FOR ANY ATTACHMENT LIKE EXCELSHEET, BORDERLESS TABLE FROM THE PDF FILES AND EXTRACT THE SAME AS PER THE BELOW PROMPT.
 DETECTION STRATEGY:
 Scan ENTIRE page for:
+Do NOT miss ANY tables or inside the table rows, including headers rows detect properly in flattern layer:
 • Explicit grid lines (bordered tables)
 • Financial tables (numbers, currency, percentages)
 • Schedule tables (dates, timelines, deliverables)
@@ -139,7 +141,8 @@ FOR EVERY TABLE:
    • continues_to_next_page: true/false (if table is cut off at bottom)
    • continued_from_previous_page: true/false (if table continues from previous page)
 
-2. HEADERS
+2. HEADERS (Compulsory check properly)
+If headers are in one row: Use flat array format and preserve order and structured format do not miss any headers.
    • Extract ALL header rows (may be multiple rows)
    • Preserve column header hierarchy
    • Example: ["Deliverables", "Estimated Sign-off", "Status"]
@@ -171,12 +174,27 @@ FOR EVERY TABLE:
    ├────────────────────────────┤  Aug 2024    │
    │ Task 2                     │              │
    ├────────────────────────────┼──────────────┤
-   
+
+   ANOTHER EXAMPLE INPUT (Visual):
+-------------------------------------------------------------------------------
+FIN   | FUNCTIONAL DESIGNATION  | PANEL | ZONE | ACCESS DOOR | ATA REF.       |
+-------------------------------------------------------------------------------
+19FP1 | ADM-L TOTAL PRESSURE    | NONE  | 125  |   812       |  34-11-17      |
+19FP2 | ADM-R TOTAL PRESSURE    |       | 126  |   822       |  34-11-17      |
+19FP3 | ADM-STBY TOTAL PRESSURE |       | 125  |   812       |  34-11-17      |
+
+    ANOTHER EXAMPLE INPUT (Visual):
+------------------------------------------------------------------
+| EQUIPMENT | 28VDC             | 115VAC            | 26VAC      |
+|           |-------------------|-------------------|            |
+|           | Typical | Maximum | Typical | Maximum |            |
+------------------------------------------------------------------
+
    REQUIRED OUTPUT:
    {
      "rows": [
-       ["Task 1", "Aug 2024"],
-       ["Task 2", "Aug 2024"]
+       ["Task 1"], ["Aug 2024"]],
+       ["Task 2"], ["Aug 2024"]]
      ],
      "has_merged_cells": true,
      "merged_cells": "Column 2: 'Aug 2024' spans rows 1-2"
@@ -199,10 +217,22 @@ REQUIRED JSON OUTPUT SCHEMA:
   "position": "<position on page>",
   "size": "<small/medium/large/full-width>",
   "table_type": "<financial/schedule/comparison/data/specification>",
-  "headers": ["Column1", "Column2", "Column3"],
+  "headers": [
+     ["Column1"],
+     ["Column2"],
+     ["Column3"]
+  ],
   "rows": [
-    ["Value1", "Value2", "Value3"],
-    ["Value4", "Value5", "Value6"]
+   [
+     ["Value1"],
+     ["Value2"],
+     ["Value3"]
+   ],
+   [
+     ["Value4"],
+     ["Value5"],
+     ["Value6"]
+   ]
   ],
   "total_rows": <number>,
   "total_columns": <number>,
@@ -221,6 +251,10 @@ IMPORTANT RULES:
 - Ensure headers are distinct from data rows
 - If NO tables found on page, return: {"has_tables": false, "tables": []}
 - If tables found, return: {"has_tables": true, "tables": [<table1>, <table2>, ...]}
+- Headers MUST be returned as an array of arrays, where each column header is wrapped in its own array
+- Each row MUST be an array of cells
+- Each cell MUST be wrapped inside its own array (even if it contains only one value)
+- Never return plain strings for headers or row cells
 """
 
 

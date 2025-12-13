@@ -181,7 +181,7 @@ class RAGService:
                 table_text = f"Table {table_idx}: {table.get('table_title', 'Untitled')} ({table.get('table_type', 'unknown')})\n"
                 table_text += f"Headers: {', '.join(str(h) for h in table.get('headers', []))}\n"
                 
-                for row_idx, row in enumerate(table.get('rows', [])[:10], 1):
+                for row_idx, row in enumerate(table.get('rows', []), 1):
                     row_str = ', '.join(str(cell) for cell in row if cell is not None)
                     table_text += f"Row {row_idx}: {row_str}\n"
                 
@@ -205,18 +205,34 @@ class RAGService:
                     chunk_counter += 1
             
             # 3. Visuals (as descriptions)
+            # 3. Visuals (as descriptions + OCR)
             for visual_idx, visual in enumerate(page.get('visuals', []), 1):
                 if visual.get('not_visual'):
                     continue
                 
                 visual_text = f"Visual: {visual.get('type', 'unknown')} on page {page_num}\n"
-                visual_text += f"Summary: {visual.get('summary', 'No summary available')}\n"
-                
+
+                # High-level summary (LLM / vision summary)
+                if visual.get('summary'):
+                    visual_text += f"Summary: {visual['summary']}\n"
+
+                # 🔥 RAW OCR / detected text (VERY IMPORTANT)
+                if visual.get('extracted_text'):
+                    visual_text += "Extracted Text:\n"
+                    visual_text += f"{visual['extracted_text']}\n"
+
+                # 🔥 Labels / objects / chart tags
+                if visual.get('labels'):
+                    visual_text += f"Labels: {', '.join(visual['labels'])}\n"
+
+                # Image size
                 if visual.get('width') and visual.get('height'):
-                    visual_text += f"Size: {visual.get('width')}x{visual.get('height')}px\n"
-                
+                    visual_text += f"Size: {visual['width']}x{visual['height']}px\n"
+
+                # Structured data (charts / tables detected inside image)
                 if visual.get('data'):
-                    visual_text += f"Data: {str(visual.get('data'))}\n"
+                    visual_text += f"Structured Data: {str(visual['data'])}\n"
+
                 
                 if visual_text.strip():
                     chunks.append(visual_text)
@@ -241,6 +257,7 @@ class RAGService:
                     "document_id": document_id,
                     "page_number": page_num,
                     "chunk_type": "summary",
+                    "is_derived": True,
                     "content": summary_text
                 }
                 metadatas.append(clean_metadata(meta))
@@ -268,6 +285,7 @@ class RAGService:
                 "document_id": document_id,
                 "page_number": 0,
                 "chunk_type": "document_summary",
+                "is_derived": True,
                 "document_type": overall_summary.get('document_type', ''),
                 "buyer": entities.get('buyer_name', ''),
                 "seller": entities.get('seller_name', ''),
@@ -329,51 +347,51 @@ class RAGService:
         document_id: Optional[str] = None,
         n_results: int = 8,
         score_threshold: float = 0.5,
-        chunk_types: Optional[List[str]] = None
+        chunk_types: Optional[List[str]] = None,
+        include_derived: bool = False
     ) -> List[Dict[str, Any]]:
-        """
-        Search RAG index with advanced filtering
-        
-        Args:
-            query: Search query
-            document_id: Optional UUID to filter by document
-            n_results: Number of results to return
-            score_threshold: Minimum similarity score (0-1)
-            chunk_types: Filter by chunk types (e.g., ['section', 'table'])
-            
-        Returns:
-            List of relevant chunks with metadata
-        """
         print(f"\n[SEARCH] Query: {query[:100]}...")
         if document_id:
             print(f"  - Document filter: {document_id}")
-        
-        # Generate query embedding
+
         query_vector = self._embed_text(query)
-        
-        # Build filter conditions
+
         must_conditions = []
-        
+        should_conditions = []
+        must_not_conditions = []
+
+        # Document-level isolation
         if document_id:
             must_conditions.append(
-                FieldCondition(
-                    key="document_id",
-                    match=MatchValue(value=document_id)
-                )
+                FieldCondition(key="document_id", match=MatchValue(value=document_id))
             )
-        
+
+        # Chunk-type filtering (OR logic)
         if chunk_types:
             for chunk_type in chunk_types:
-                must_conditions.append(
-                    FieldCondition(
-                        key="chunk_type",
-                        match=MatchValue(value=chunk_type)
-                    )
+                should_conditions.append(
+                    FieldCondition(key="chunk_type", match=MatchValue(value=chunk_type))
                 )
-        
-        query_filter = Filter(must=must_conditions) if must_conditions else None
-        
-        # FIXED: Use query_points instead of search (modern Qdrant API)
+
+        # Exclude derived content by default
+        if not include_derived:
+            must_not_conditions.append(
+                FieldCondition(key="is_derived", match=MatchValue(value=True))
+            )
+
+        # Build final filter safely
+        filter_kwargs = {}
+        if must_conditions:
+            filter_kwargs["must"] = must_conditions
+        if should_conditions:
+            filter_kwargs["should"] = should_conditions
+            filter_kwargs["minimum_should_match"] = 1
+        if must_not_conditions:
+            filter_kwargs["must_not"] = must_not_conditions
+
+        query_filter = Filter(**filter_kwargs) if filter_kwargs else None
+
+        # Execute search
         try:
             response = self.client.query_points(
                 collection_name=self.collection_name,
@@ -383,12 +401,9 @@ class RAGService:
                 with_payload=True,
                 score_threshold=score_threshold
             )
-            
-            # Extract points from response
             results = response.points if hasattr(response, 'points') else response
-            
         except AttributeError:
-            # Fallback to older search method if query_points doesn't exist
+            # Fallback for older API
             print("[INFO] Falling back to legacy search method")
             results = self.client.search(
                 collection_name=self.collection_name,
@@ -397,22 +412,21 @@ class RAGService:
                 query_filter=query_filter,
                 score_threshold=score_threshold
             )
-        
+
         print(f"[OK] Found {len(results)} results")
-        
+
         # Format results
         retrieved = []
         for hit in results:
             retrieved.append({
                 "content": hit.payload.get("content", ""),
-                "metadata": {
-                    k: v for k, v in hit.payload.items() if k != "content"
-                },
+                "metadata": {k: v for k, v in hit.payload.items() if k != "content"},
                 "score": hit.score,
                 "id": hit.id
             })
-        
+
         return retrieved
+
     
     def delete_document(self, document_id: str) -> bool:
         """
@@ -521,18 +535,12 @@ class RAGService:
 if __name__ == "__main__":
     # Initialize RAG service (local Qdrant)
     rag = RAGService(
-        qdrant_host="localhost",
+        qdrant_host="qdrant",
         qdrant_port=6333,
         embedding_model="BAAI/bge-large-en-v1.5"
     )
     
-    # For Qdrant Cloud, use:
-    # rag = RAGService(
-    #     use_cloud=True,
-    #     qdrant_url="https://your-cluster.qdrant.io",
-    #     qdrant_api_key="your-api-key"
-    # )
-    
+
     # Get stats
     stats = rag.get_stats()
     print(f"\nRAG Stats: {stats}")
