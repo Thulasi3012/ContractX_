@@ -1,11 +1,9 @@
-# Python cache
-__pycache__/
-*.pyc
-
-# Virtual environment
-venv/
+# Env
 .env
 .env.*
-__pycache__/
-*.pyc
-.env.local
+
+# Runtime files
+uploads/
+visuals/
+logs/
+*.log
