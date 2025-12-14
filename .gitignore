@@ -1,9 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Env
 .env
 .env.*
 
-# Runtime files
+# Runtime
 uploads/
 visuals/
 logs/
-*.log
