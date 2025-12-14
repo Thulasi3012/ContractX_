@@ -1,32 +1,14 @@
-name: Deploy ContractX to EC2
-
-on:
-  push:
-    branches:
-      - production
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}      # 3.106.116.106
-          username: ec2-user                 # your EC2 username
-          key: ${{ secrets.EC2_SSH_KEY }}    # private key
-          port: 22
-          debug: true                         # verbose logs
-          script: |
-            mkdir -p ~/.ssh
-            echo "StrictHostKeyChecking no" >> ~/.ssh/config
-            chmod 600 ~/.ssh/config
-            cd /home/ContractX/contractx
-            git pull origin production
-            docker compose down
-            docker compose build
-            docker compose up -d
+- name: Deploy to EC2
+  uses: appleboy/ssh-action@v1.0.3
+  with:
+    host: ${{ secrets.EC2_HOST }}   # 3.106.116.106
+    username: ec2-user
+    key: ${{ secrets.EC2_SSH_KEY }}
+    port: 22
+    debug: true
+    script: |
+      cd /home/ec2-user/contractx
+      git pull origin production
+      docker compose down
+      docker compose build
+      docker compose up -d
