@@ -2,7 +2,7 @@
 
 A sophisticated document analysis system that combines AI-powered text extraction, table detection, visual recognition, knowledge graph construction, and an intelligent RAG+KG chatbot for comprehensive contract and business document analysis.
 
-**Version:** 4.0.0  
+**Version:** 1.0.0  
 **Status:** Production Ready  
 ---
 
@@ -64,18 +64,18 @@ A sophisticated document analysis system that combines AI-powered text extractio
 
 ### External Services Required
 - **Gemini API Key** (Google Cloud) - for text/table/image analysis
-- **PostgreSQL** (v12+) or **MySQL** (v8+) - for document storage
+- **PostgreSQL** (v12+) or 
 - **Neo4j** (v4.4+) - for knowledge graph
 - **Qdrant** (latest) - for vector search & RAG
 
 ---
 
-## Quick Start (Docker) ⚡
+## Quick Start (Docker) 
 
 The fastest way to get ContractX running with all services:
 
 ### Prerequisites
-- Docker Desktop installed and running
+
 - API keys ready (.env file)
 
 ### 1. Clone Repository
@@ -2099,29 +2099,13 @@ docker volume inspect contractx_qdrant_data
 ```
 
 ---
-
-## Support & Contribution
-
-For issues, questions, or contributions:
-- **GitHub Issues**: https://github.com/yourusername/ContractX/issues
-- **Email**: support@yourcompany.com
-- **Documentation**: See AUDIT_REPORT.md
-
----
-
-## License
-
-MIT License - See LICENSE file for details
-
----
-
 ## Version History
 
 - **v4.0.0** (Current) - Full pipeline with chatbot, RAG, KG, DB, visual summaries
 - **v3.5.0** - Image detection with Gemini analysis
 - **v3.0.0** - Advanced table detection
 - **v2.0.0** - Image detection added
-- **v1.0.0** - Initial release
+- **v1.0.0** - Initial release for text
 
 ---
 
