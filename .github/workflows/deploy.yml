@@ -17,7 +17,7 @@ jobs:
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}      # 3.106.116.106
-          username: ContractX                 # your EC2 username
+          username: ec2-user                 # your EC2 username
           key: ${{ secrets.EC2_SSH_KEY }}    # private key
           port: 22
           debug: true                         # verbose logs
