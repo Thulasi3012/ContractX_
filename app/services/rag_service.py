@@ -20,31 +20,28 @@ import os
 from typing import List, Dict, Any, Optional
 from uuid import uuid4
 import json
+from app.config.config import Config
 
 
 class RAGService:
     """Advanced RAG service with Qdrant and document isolation"""
     
     def __init__(
-        self,
-        qdrant_host: str = "localhost",
-        qdrant_port: int = 6333,
-        embedding_model: str = "BAAI/bge-large-en-v1.5",
-        use_cloud: bool = False,
-        qdrant_url: Optional[str] = None,
-        qdrant_api_key: Optional[str] = None
-    ):
+    self,
+    qdrant_host: Optional[str] = None,
+    qdrant_port: Optional[int] = None,
+    embedding_model: str = "BAAI/bge-large-en-v1.5",
+    use_cloud: bool = False,
+    qdrant_url: Optional[str] = None,
+    qdrant_api_key: Optional[str] = None
+):
         """
         Initialize RAG service with Qdrant
-        
-        Args:
-            qdrant_host: Qdrant server host (for local)
-            qdrant_port: Qdrant server port (for local)
-            embedding_model: Sentence transformer model
-            use_cloud: Use Qdrant Cloud instead of local
-            qdrant_url: Qdrant Cloud URL
-            qdrant_api_key: Qdrant Cloud API key
         """
+        # Use passed arguments, fallback to Config, then defaults
+        self.qdrant_host = qdrant_host or Config.QDRANT_HOST or "localhost"
+        self.qdrant_port = qdrant_port or Config.QDRANT_PORT or 6333
+
         # Initialize Qdrant client
         if use_cloud:
             if not qdrant_url or not qdrant_api_key:
@@ -52,42 +49,26 @@ class RAGService:
             self.client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
             print(f"[OK] Connected to Qdrant Cloud: {qdrant_url}")
         else:
-            self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
-            print(f"[OK] Connected to Qdrant: {qdrant_host}:{qdrant_port}")
-        
+            self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port)
+            print(f"[OK] Connected to Qdrant: {self.qdrant_host}:{self.qdrant_port}")
+
         # Initialize embedding model
         print(f"[LOADING] Embedding model: {embedding_model}")
         self.embedding_model = SentenceTransformer(embedding_model)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         print(f"[OK] Embedding model loaded (dim={self.embedding_dim})")
-        
+
         # Collection name
         self.collection_name = "contractx_documents"
-        
+
         # Create collection if not exists
         self._ensure_collection()
-        
+
         print(f"[OK] RAG Service initialized")
         print(f"  - Collection: {self.collection_name}")
         print(f"  - Embedding: {embedding_model}")
         print(f"  - Vector dim: {self.embedding_dim}")
-    
-    def _ensure_collection(self):
-        """Create collection if it doesn't exist"""
-        collections = self.client.get_collections().collections
-        collection_names = [col.name for col in collections]
-        
-        if self.collection_name not in collection_names:
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=self.embedding_dim,
-                    distance=Distance.COSINE
-                )
-            )
-            print(f"[OK] Created collection: {self.collection_name}")
-        else:
-            print(f"[OK] Collection exists: {self.collection_name}")
+
     
     def _embed_text(self, text: str) -> List[float]:
         """Generate embedding for text"""
@@ -535,8 +516,8 @@ class RAGService:
 if __name__ == "__main__":
     # Initialize RAG service (local Qdrant)
     rag = RAGService(
-        qdrant_host="qdrant",
-        qdrant_port=6333,
+        qdrant_host=Config.QDRANT_HOST,
+        qdrant_port=Config.QDRANT_PORT,
         embedding_model="BAAI/bge-large-en-v1.5"
     )
     

@@ -18,6 +18,10 @@ class Config:
     RETRY_DELAY = int(os.getenv("RETRY_DELAY", "60"))  # initial retry delay in seconds
     EXPONENTIAL_BACKOFF = os.getenv("EXPONENTIAL_BACKOFF", "true").lower() == "true"
     
+    #Qdrant Configuration
+    QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")  # default = Docker service name
+    QDRANT_PORT = int(os.getenv("QDRANT_PORT", 6333))
+
     # Server Configuration
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "8000"))
