@@ -22,7 +22,6 @@ from uuid import uuid4
 import json
 from app.config.config import Config
 
-
 class RAGService:
     """Advanced RAG service with Qdrant and document isolation"""
     
@@ -34,14 +33,12 @@ class RAGService:
     use_cloud: bool = False,
     qdrant_url: Optional[str] = None,
     qdrant_api_key: Optional[str] = None
-):
+):      # Use passed arguments, fallback to Config, then defaults
         """
         Initialize RAG service with Qdrant
         """
-        # Use passed arguments, fallback to Config, then defaults
         self.qdrant_host = qdrant_host or Config.QDRANT_HOST or "localhost"
         self.qdrant_port = qdrant_port or Config.QDRANT_PORT or 6333
-
         # Initialize Qdrant client
         if use_cloud:
             if not qdrant_url or not qdrant_api_key:
@@ -51,24 +48,40 @@ class RAGService:
         else:
             self.client = QdrantClient(host=self.qdrant_host, port=self.qdrant_port)
             print(f"[OK] Connected to Qdrant: {self.qdrant_host}:{self.qdrant_port}")
-
+        
         # Initialize embedding model
         print(f"[LOADING] Embedding model: {embedding_model}")
         self.embedding_model = SentenceTransformer(embedding_model)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
         print(f"[OK] Embedding model loaded (dim={self.embedding_dim})")
-
+        
         # Collection name
         self.collection_name = "contractx_documents"
-
+        
         # Create collection if not exists
         self._ensure_collection()
-
+        
         print(f"[OK] RAG Service initialized")
         print(f"  - Collection: {self.collection_name}")
         print(f"  - Embedding: {embedding_model}")
         print(f"  - Vector dim: {self.embedding_dim}")
-
+    
+    def _ensure_collection(self):
+        """Create collection if it doesn't exist"""
+        collections = self.client.get_collections().collections
+        collection_names = [col.name for col in collections]
+        
+        if self.collection_name not in collection_names:
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=self.embedding_dim,
+                    distance=Distance.COSINE
+                )
+            )
+            print(f"[OK] Created collection: {self.collection_name}")
+        else:
+            print(f"[OK] Collection exists: {self.collection_name}")
     
     def _embed_text(self, text: str) -> List[float]:
         """Generate embedding for text"""
@@ -186,34 +199,18 @@ class RAGService:
                     chunk_counter += 1
             
             # 3. Visuals (as descriptions)
-            # 3. Visuals (as descriptions + OCR)
             for visual_idx, visual in enumerate(page.get('visuals', []), 1):
                 if visual.get('not_visual'):
                     continue
                 
                 visual_text = f"Visual: {visual.get('type', 'unknown')} on page {page_num}\n"
-
-                # High-level summary (LLM / vision summary)
-                if visual.get('summary'):
-                    visual_text += f"Summary: {visual['summary']}\n"
-
-                # 🔥 RAW OCR / detected text (VERY IMPORTANT)
-                if visual.get('extracted_text'):
-                    visual_text += "Extracted Text:\n"
-                    visual_text += f"{visual['extracted_text']}\n"
-
-                # 🔥 Labels / objects / chart tags
-                if visual.get('labels'):
-                    visual_text += f"Labels: {', '.join(visual['labels'])}\n"
-
-                # Image size
+                visual_text += f"Summary: {visual.get('summary', 'No summary available')}\n"
+                
                 if visual.get('width') and visual.get('height'):
-                    visual_text += f"Size: {visual['width']}x{visual['height']}px\n"
-
-                # Structured data (charts / tables detected inside image)
+                    visual_text += f"Size: {visual.get('width')}x{visual.get('height')}px\n"
+                
                 if visual.get('data'):
-                    visual_text += f"Structured Data: {str(visual['data'])}\n"
-
+                    visual_text += f"Data: {str(visual.get('data'))}\n"
                 
                 if visual_text.strip():
                     chunks.append(visual_text)
@@ -238,7 +235,6 @@ class RAGService:
                     "document_id": document_id,
                     "page_number": page_num,
                     "chunk_type": "summary",
-                    "is_derived": True,
                     "content": summary_text
                 }
                 metadatas.append(clean_metadata(meta))
@@ -266,7 +262,6 @@ class RAGService:
                 "document_id": document_id,
                 "page_number": 0,
                 "chunk_type": "document_summary",
-                "is_derived": True,
                 "document_type": overall_summary.get('document_type', ''),
                 "buyer": entities.get('buyer_name', ''),
                 "seller": entities.get('seller_name', ''),
@@ -328,51 +323,51 @@ class RAGService:
         document_id: Optional[str] = None,
         n_results: int = 8,
         score_threshold: float = 0.5,
-        chunk_types: Optional[List[str]] = None,
-        include_derived: bool = False
+        chunk_types: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
+        """
+        Search RAG index with advanced filtering
+        
+        Args:
+            query: Search query
+            document_id: Optional UUID to filter by document
+            n_results: Number of results to return
+            score_threshold: Minimum similarity score (0-1)
+            chunk_types: Filter by chunk types (e.g., ['section', 'table'])
+            
+        Returns:
+            List of relevant chunks with metadata
+        """
         print(f"\n[SEARCH] Query: {query[:100]}...")
         if document_id:
             print(f"  - Document filter: {document_id}")
-
+        
+        # Generate query embedding
         query_vector = self._embed_text(query)
-
+        
+        # Build filter conditions
         must_conditions = []
-        should_conditions = []
-        must_not_conditions = []
-
-        # Document-level isolation
+        
         if document_id:
             must_conditions.append(
-                FieldCondition(key="document_id", match=MatchValue(value=document_id))
+                FieldCondition(
+                    key="document_id",
+                    match=MatchValue(value=document_id)
+                )
             )
-
-        # Chunk-type filtering (OR logic)
+        
         if chunk_types:
             for chunk_type in chunk_types:
-                should_conditions.append(
-                    FieldCondition(key="chunk_type", match=MatchValue(value=chunk_type))
+                must_conditions.append(
+                    FieldCondition(
+                        key="chunk_type",
+                        match=MatchValue(value=chunk_type)
+                    )
                 )
-
-        # Exclude derived content by default
-        if not include_derived:
-            must_not_conditions.append(
-                FieldCondition(key="is_derived", match=MatchValue(value=True))
-            )
-
-        # Build final filter safely
-        filter_kwargs = {}
-        if must_conditions:
-            filter_kwargs["must"] = must_conditions
-        if should_conditions:
-            filter_kwargs["should"] = should_conditions
-            filter_kwargs["minimum_should_match"] = 1
-        if must_not_conditions:
-            filter_kwargs["must_not"] = must_not_conditions
-
-        query_filter = Filter(**filter_kwargs) if filter_kwargs else None
-
-        # Execute search
+        
+        query_filter = Filter(must=must_conditions) if must_conditions else None
+        
+        # FIXED: Use query_points instead of search (modern Qdrant API)
         try:
             response = self.client.query_points(
                 collection_name=self.collection_name,
@@ -382,9 +377,12 @@ class RAGService:
                 with_payload=True,
                 score_threshold=score_threshold
             )
+            
+            # Extract points from response
             results = response.points if hasattr(response, 'points') else response
+            
         except AttributeError:
-            # Fallback for older API
+            # Fallback to older search method if query_points doesn't exist
             print("[INFO] Falling back to legacy search method")
             results = self.client.search(
                 collection_name=self.collection_name,
@@ -393,21 +391,22 @@ class RAGService:
                 query_filter=query_filter,
                 score_threshold=score_threshold
             )
-
+        
         print(f"[OK] Found {len(results)} results")
-
+        
         # Format results
         retrieved = []
         for hit in results:
             retrieved.append({
                 "content": hit.payload.get("content", ""),
-                "metadata": {k: v for k, v in hit.payload.items() if k != "content"},
+                "metadata": {
+                    k: v for k, v in hit.payload.items() if k != "content"
+                },
                 "score": hit.score,
                 "id": hit.id
             })
-
+        
         return retrieved
-
     
     def delete_document(self, document_id: str) -> bool:
         """
@@ -520,7 +519,6 @@ if __name__ == "__main__":
         qdrant_port=Config.QDRANT_PORT,
         embedding_model="BAAI/bge-large-en-v1.5"
     )
-    
 
     # Get stats
     stats = rag.get_stats()
