@@ -10,18 +10,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ secrets.EC2_HOST }}      # 3.106.116.106
+          username: ContractX                 # your EC2 username
+          key: ${{ secrets.EC2_SSH_KEY }}    # private key
+          port: 22
+          debug: true                         # verbose logs
           script: |
-            cd /home/ec2-user/contractx
+            mkdir -p ~/.ssh
+            echo "StrictHostKeyChecking no" >> ~/.ssh/config
+            chmod 600 ~/.ssh/config
+            cd /home/ContractX/contractx
             git pull origin production
             docker compose down
             docker compose build
             docker compose up -d
-
-
-
