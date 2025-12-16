@@ -25,13 +25,14 @@ class DatabaseService:
         if self.db:
             self.db.close()
             self.db = None
-    
+     
     def store_document(self, extraction_result: Dict[str, Any]) -> str:
         """
         Store extracted document data in the database
         """
         try:
             db = self.get_db()
+            document_content = extraction_result.get("document_content")
 
             # Generate UUID
             document_id = str(uuid.uuid4())
@@ -76,7 +77,7 @@ class DatabaseService:
 
             # Text and JSON
             cleaned_text = self._compile_cleaned_text(pages_data)
-            text_as_json = self._create_text_json(pages_data)
+            text_as_json = document_content
 
             print(f"\n[DB] Storing document:")
             print(f"  - Document Type: {document_type}")
@@ -190,84 +191,6 @@ class DatabaseService:
                         parts.append(f"{indent}      ○ {sub_clause_text}")
         
         return parts
-    
-    def _create_text_json(self, pages_data: list) -> Dict[str, Any]:
-        """Create comprehensive JSON structure of document content"""
-        json_structure = {
-            "pages": [],
-            "tables": [],
-            "visuals": [],
-            "entities_summary": {
-                "buyers": [],
-                "sellers": [],
-                "all_dates": [],
-                "all_deadlines": [],
-                "all_alerts": [],
-                "all_obligations": []
-            }
-        }
-        
-        for page in pages_data:
-            page_num = page.get('page_number', 0)
-            text_analysis = page.get('text_analysis', {})
-            tables = page.get('tables', [])
-            visuals = page.get('visuals', [])
-            entities = text_analysis.get('entities', {})
-            
-            # Collect entities across all pages
-            if entities.get('buyer_name'):
-                json_structure["entities_summary"]["buyers"].append(entities['buyer_name'])
-            if entities.get('seller_name'):
-                json_structure["entities_summary"]["sellers"].append(entities['seller_name'])
-            
-            json_structure["entities_summary"]["all_dates"].extend(entities.get('dates', []))
-            json_structure["entities_summary"]["all_deadlines"].extend(entities.get('deadlines', []))
-            json_structure["entities_summary"]["all_alerts"].extend(entities.get('alerts', []))
-            
-            if entities.get('obligations'):
-                json_structure["entities_summary"]["all_obligations"].extend(entities.get('obligations', []))
-            
-            # Page content
-            page_content = {
-                "page_number": page_num,
-                "sections": text_analysis.get('sections', []),
-                "entities": entities,
-                "summary": text_analysis.get('summary', ''),
-                "sections_count": text_analysis.get('sections_count', 0)
-            }
-            json_structure["pages"].append(page_content)
-            
-            # Tables
-            for table in tables:
-                table_data = {
-                    "page_number": page_num,
-                    "table_id": table.get('table_id'),
-                    "title": table.get('table_title'),
-                    "rows": table.get('total_rows'),
-                    "columns": table.get('total_columns'),
-                    "has_merged_cells": table.get('has_merged_cells', False),
-                    "headers": table.get('headers', []),
-                    "data": table.get('rows', [])
-                }
-                json_structure["tables"].append(table_data)
-            
-            # Visuals
-            for visual in visuals:
-                visual_data = {
-                    "page_number": page_num,
-                    "type": visual.get('type'),
-                    "bbox": visual.get('bbox')
-                }
-                json_structure["visuals"].append(visual_data)
-        
-        # Deduplicate
-        json_structure["entities_summary"]["buyers"] = list(set(filter(None, json_structure["entities_summary"]["buyers"])))
-        json_structure["entities_summary"]["sellers"] = list(set(filter(None, json_structure["entities_summary"]["sellers"])))
-        json_structure["entities_summary"]["all_dates"] = list(set(filter(None, json_structure["entities_summary"]["all_dates"])))
-        json_structure["entities_summary"]["all_deadlines"] = list(set(filter(None, json_structure["entities_summary"]["all_deadlines"])))
-        json_structure["entities_summary"]["all_alerts"] = list(set(filter(None, json_structure["entities_summary"]["all_alerts"])))
-        
-        return json_structure
     
     def _generate_overall_summary(self, pages_data: list) -> Dict[str, Any]:
         """
