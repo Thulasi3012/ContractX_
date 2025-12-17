@@ -16,8 +16,8 @@ from app.config.config import Config
 # Gemini API Pricing (as of 2025) - Update these based on current pricing
 GEMINI_PRICING: Dict[str, Dict[str, float]] = {
     "gemini-2.0-flash-exp": {"input_per_million": 0.0, "output_per_million": 0.0},
-    "gemini-2.0-flash": {"input_per_million": 0.25, "output_per_million": 1.0},  # example pricing
-    "gemini-2.5-flash": {"input_per_million": 0.10, "output_per_million": 0.40},
+    "gemini-2.0-flash": {"input_per_million": 0.30, "output_per_million": 1.0},  # example pricing
+    "gemini-2.5-flash": {"input_per_million": 0.30, "output_per_million": 0.40},
     "gemini-1.5-flash": {"input_per_million": 0.075, "output_per_million": 0.30},
     "gemini-1.5-pro": {"input_per_million": 1.25, "output_per_million": 5.00},
 }

@@ -1,31 +1,39 @@
 """
 Text Analysis using Gemini
-Extracts sections, clauses, entities, and page summary from images
+Extracts sections, clauses, entities from images
 """
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import json
 import asyncio
+import io
 from typing import Dict, Any
 from app.config.config import Config
 from app.services.LLM_tracker import LLMUsageTracker
 
 class TextAnalyzer:
-    """Analyze document text for structure, entities, and summary"""
+    """Analyze document text for structure, entities"""
     
     def __init__(self):
         api_key = Config.GEMINI_API_KEY
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set!")
         
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(Config.GEMINI_MODEL)
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = Config.GEMINI_MODEL
         self.request_delay = float(os.getenv("GEMINI_REQUEST_DELAY", "3.0"))
         self.max_retries = int(os.getenv("MAX_RETRIES", "5"))
         self.retry_delay = int(os.getenv("RETRY_DELAY", "60"))
         
         print("[OK] TextAnalyzer initialized")
+    
+    def pil_to_png_bytes(self, image):
+        """Convert PIL image to PNG bytes for Gemini API"""
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return buf.getvalue()
     
     async def analyze_text(self, page_number: int, page_data: Dict[str, Any], usage_tracker: LLMUsageTracker = None) -> Dict[str, Any]:
         """
@@ -33,25 +41,36 @@ class TextAnalyzer:
         """
         page_image = page_data['pil_image']  # Get the image
         
+        # Ensure image is in RGB mode
+        if page_image.mode != 'RGB':
+            page_image = page_image.convert('RGB')
+        
         for attempt in range(1, self.max_retries + 1):
             try:
                 await asyncio.sleep(self.request_delay)
                 
-                # Get the analysis prompt (without text content since we're using image)
+                # Get the analysis prompt
                 prompt = self._create_prompt(page_number)
                 
                 if usage_tracker:
                     usage_tracker.start_request(prompt)
                 
-                # Send BOTH the prompt AND the image to Gemini
-                response = self.model.generate_content([prompt, page_image])
-                
+                # Use new GenAI SDK - simplified approach
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[prompt, page_image],  # Try passing PIL image directly
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json"
+                    )
+                )
+                  
                 if usage_tracker:
                     usage_tracker.end_request(response)
                 
                 result_text = response.text.strip()
                 
-                # Clean JSON
+                # Clean JSON (kept for backward compatibility, but should be unnecessary now)
                 if result_text.startswith("```json"):
                     result_text = result_text[7:]
                 if result_text.startswith("```"):
@@ -64,10 +83,6 @@ class TextAnalyzer:
                 # Add metadata
                 data['page_number'] = page_number
                 data['sections_count'] = len(data.get('sections', []))
-                
-                # Ensure summary exists
-                if not data.get('summary'):
-                    data['summary'] = self._generate_fallback_summary(data)
                 
                 return data
                 
@@ -307,7 +322,6 @@ Return ONLY valid JSON (no markdown):
       ]
     }}
   ],
-  "summary": "Concise summary: Who is buyer/seller, important dates, deadlines, alerts, and count of tables. Keep to 2-3 sentences max.",
   "entities": {{
     "document_type": "Type (Order Form, Agreement, Invoice, etc.) from TEXT",
     "buyer_name": "Buyer/Client name from text or null",

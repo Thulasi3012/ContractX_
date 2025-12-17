@@ -1,9 +1,11 @@
 # app/services/chatbot_service.py
 """
 Chatbot Service - Combines RAG and Knowledge Graph for intelligent Q&A
+Updated to use google.genai (new SDK)
 """
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 from typing import Dict, Any, List
 from app.services.rag_service import RAGService
@@ -14,16 +16,16 @@ class ChatbotService:
     """Intelligent chatbot combining RAG + Knowledge Graph"""
     
     def __init__(self):
-        # Configure Gemini
-        genai.configure(api_key=Config.GEMINI_API_KEY)
-        self.model = genai.GenerativeModel(Config.GEMINI_MODEL)
+        # Initialize Gemini client (NEW SDK)
+        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        self.model_name = Config.GEMINI_MODEL  # e.g., "gemini-1.5-pro" or "gemini-2.0-flash-exp"
 
         # Initialize services
         self.rag_service = RAGService()
         self.kg_builder = KnowledgeGraphBuilder()
         
         print("[OK] Chatbot Service initialized")
-        print(f"  - LLM: {self.model}")
+        print(f"  - LLM: {self.model_name}")
         print("  - RAG: Enabled")
         print("  - KG: Enabled")
     
@@ -377,7 +379,7 @@ class ChatbotService:
         context: str, 
         document_id: str
     ) -> Dict[str, Any]:
-        """Generate answer using Gemini LLM"""
+        """Generate answer using Gemini (NEW SDK: google.genai)"""
         
         prompt = f"""You are a precise AI assistant analyzing technical documents. Your primary goal is to provide accurate, factual answers based strictly on the provided context.
 
@@ -429,35 +431,59 @@ CRITICAL INSTRUCTIONS:
    - Financial data (payments, costs, invoices)
    - Compliance and regulatory information
 
-7.CRITICAL TABLE ANSWERING RULES:
-
-    7.1. Never infer or rename column labels.
-    7.2. Column names must match retrieved table headers exactly.
-    7.3. Never guess the column name.
-    7.4. If a question asks where a value is held, determine the column strictly from the retrieved table.
-    7.5. If column certainty is less than 100%, respond using this exact template:
-
-    "The value <VALUE> appears in the <COLUMN_NAME> column according to the table."
-
-    7.6. Replace <VALUE> and <COLUMN_NAME> dynamically using retrieved data only.
-    7.7. If no column can be confidently identified, explicitly state that the column cannot be determined from the table.
+7. CRITICAL TABLE ANSWERING RULES:
+   7.1. Never infer or rename column labels.
+   7.2. Column names must match retrieved table headers exactly.
+   7.3. Never guess the column name.
+   7.4. If a question asks where a value is held, determine the column strictly from the retrieved table.
+   7.5. If column certainty is less than 100%, respond using this exact template:
+        "The value <VALUE> appears in the <COLUMN_NAME> column according to the table."
+   7.6. Replace <VALUE> and <COLUMN_NAME> dynamically using retrieved data only.
+   7.7. If no column can be confidently identified, explicitly state that the column cannot be determined from the table.
 
 ANSWER:"""
         
         try:
-            response = self.model.generate_content(prompt)
-            answer_text = response.text
+            # NEW SDK: Use client.models.generate_content()
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=prompt)]
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=2048,
+                    top_p=0.95,
+                    top_k=40
+                )
+            )
+            
+            # Extract text from response
+            answer_text = response.text if hasattr(response, 'text') else ""
+            
+            # Fallback: if response.text doesn't exist, extract from candidates
+            if not answer_text and hasattr(response, 'candidates') and response.candidates:
+                first_candidate = response.candidates[0]
+                if hasattr(first_candidate, 'content') and hasattr(first_candidate.content, 'parts'):
+                    answer_text = "".join(
+                        part.text for part in first_candidate.content.parts if hasattr(part, 'text')
+                    )
             
             # Determine confidence based on context availability
             confidence = "high" if context and len(context) > 100 else "low"
             
             return {
-                "text": answer_text,
+                "text": answer_text.strip(),
                 "confidence": confidence
             }
         
         except Exception as e:
             print(f"[ERROR] Answer generation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "text": "I apologize, but I encountered an error while generating the answer. Please try again.",
                 "confidence": "low"

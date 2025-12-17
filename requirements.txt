@@ -23,6 +23,7 @@ numpy
 google-generativeai
 transformers
 torch
+
 torchvision
 
 # Utilities

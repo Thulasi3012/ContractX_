@@ -10,17 +10,18 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from pdf2image import convert_from_bytes
 import io
 from app.config.config import Config
-from app.services.LLM_tracker import LLMUsageTracker  # NEW IMPORT
+from app.services.LLM_tracker import LLMUsageTracker
 
 # Load environment variables
 load_dotenv()
 
-# Configure Gemini API
-genai.configure(api_key=Config.GEMINI_API_KEY)
+# Initialize Gemini client
+client = genai.Client(api_key=Config.GEMINI_API_KEY)
 
 
 class PDFProcessor:
@@ -63,7 +64,7 @@ class PDFProcessor:
         page_image, 
         page_num: int, 
         total_pages: int,
-        usage_tracker: Optional[LLMUsageTracker] = None  # NEW PARAMETER
+        usage_tracker: Optional[LLMUsageTracker] = None
     ) -> Dict[str, Any]:
         """
         Detect and extract tables from a single page using Gemini API
@@ -81,7 +82,7 @@ class PDFProcessor:
             page_image, 
             page_num, 
             total_pages,
-            usage_tracker=usage_tracker  # PASS TRACKER
+            usage_tracker=usage_tracker
         )
 
 
@@ -98,7 +99,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_filename),
-        logging.StreamHandler()  # Also print to console
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -280,7 +281,7 @@ def detect_tables_in_page(
     page_image, 
     page_num: int, 
     total_pages: int,
-    usage_tracker: Optional[LLMUsageTracker] = None  # NEW PARAMETER
+    usage_tracker: Optional[LLMUsageTracker] = None
 ) -> Dict[str, Any]:
     """
     Detect and extract tables from a single page using Gemini API
@@ -300,6 +301,7 @@ def detect_tables_in_page(
 
     last_error = None
     model_used = None
+    response_text = ""
 
     try:
         # Try model names one by one
@@ -307,8 +309,6 @@ def detect_tables_in_page(
             try:
                 logger.info(f"  Trying model: {model_name}")
                 model_start = time.time()
-                
-                model = genai.GenerativeModel(model_name)
 
                 prompt = f"""Analyze this PDF page (Page {page_num}) and extract ALL tables found.
 
@@ -320,19 +320,25 @@ Respond with ONLY valid JSON, no markdown formatting, no code blocks."""
                 if usage_tracker:
                     usage_tracker.start_request(prompt)
                 
-                response = model.generate_content([prompt, page_image])
-                
+                # Use new GenAI SDK
+                response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    prompt,
+                    page_image  # ← Just pass the PIL image directly
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json"
+                )
+            )   
                 # TRACK LLM USAGE: End request
                 if usage_tracker:
                     usage_tracker.end_request(response)
                 
                 # Check if response was blocked by safety filters
-                if not response.parts:
-                    if hasattr(response, 'prompt_feedback'):
-                        block_reason = response.prompt_feedback
-                        logger.warning(f"  Response blocked by safety filters: {block_reason}")
-                    else:
-                        logger.warning(f"  Response blocked - no content returned")
+                if not hasattr(response, 'text') or not response.text:
+                    logger.warning(f"  Response blocked - no content returned")
                     
                     # Return empty result for this page
                     page_time = time.time() - page_start_time
@@ -366,12 +372,10 @@ Respond with ONLY valid JSON, no markdown formatting, no code blocks."""
             logger.error(f"  {error_msg}")
             raise Exception(error_msg)
 
-        # ---------------------------
         # Parse JSON response
-        # ---------------------------
         logger.info(f"  Parsing response...")
 
-        # Remove code blocks if present
+        # Clean JSON (kept for backward compatibility, should be unnecessary with JSON mode)
         if response_text.startswith("```json"):
             response_text = response_text[7:]
         if response_text.startswith("```"):
@@ -443,6 +447,7 @@ Respond with ONLY valid JSON, no markdown formatting, no code blocks."""
             "error": error_msg
         }
 
+
 def merge_continued_tables(extraction_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Merge tables that span multiple pages
@@ -498,6 +503,7 @@ def merge_continued_tables(extraction_results: List[Dict[str, Any]]) -> List[Dic
     
     return merged_results
 
+
 def process_pdf(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
     """
     Process entire PDF and extract tables from all pages
@@ -520,19 +526,19 @@ def process_pdf(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
         all_results = []
         total_tables = 0
         pages_with_tables = 0
-        
+
         # Process each page
         for page_num, image in enumerate(images, start=1):
             print(f"Processing page {page_num}/{total_pages}...")
             
-            page_result = detect_tables_in_page(image, page_num, total_pages)
+            page_result = detect_tables_in_page(image, page_num, total_pages, usage_tracker=None)
             all_results.append(page_result)
             
             if page_result["has_tables"]:
                 pages_with_tables += 1
                 total_tables += page_result["table_count"]
         
-         # Merge tables that span multiple pages
+        # Merge tables that span multiple pages
         all_results = merge_continued_tables(all_results)
         
         # Recalculate totals after merging
@@ -584,41 +590,3 @@ def process_pdf(pdf_bytes: bytes, filename: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Fatal error processing PDF: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
-
-
-
-# @app.post("/extract-tables/", response_model=TableExtractionResponse)
-# async def extract_tables(file: UploadFile = File(...)):
-#     """
-#     Extract tables from uploaded PDF file
-    
-#     - Detects all tables in the PDF
-#     - Extracts complete table structure including merged cells
-#     - Handles tables that span multiple pages
-#     - Returns JSON with all extracted tables
-#     - Saves results to extracted_tables directory
-#     - Creates detailed log file for debugging
-#     """
-#     # Validate file type
-#     if not file.filename.endswith('.pdf'):
-#         raise HTTPException(status_code=400, detail="Only PDF files are supported")
-    
-#     # Check API key
-#     if not os.getenv("GEMINI_API_KEY"):
-#         raise HTTPException(
-#             status_code=500, 
-#             detail="GEMINI_API_KEY not found in environment variables"
-#         )
-    
-#     try:
-#         # Read PDF file
-#         pdf_bytes = await file.read()
-        
-#         # Process PDF
-#         result = process_pdf(pdf_bytes, file.filename)
-        
-#         return JSONResponse(content=result)
-        
-#     except Exception as e:
-#         logger.error(f"API Error: {str(e)}", exc_info=True)
-#         raise HTTPException(status_code=500, detail=str(e))

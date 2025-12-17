@@ -8,698 +8,672 @@ from typing import List, Dict, Optional, Tuple
 from PIL import Image
 import cv2
 import numpy as np
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from app.config.config import Config
 from app.services.LLM_tracker import LLMUsageTracker
 
 
 class ImageDetector:
-        """
-        Enhanced detector with multi-chart splitting, UI filtering, schematic handling, and Gantt chart fixes.
+    """
+    Enhanced detector with comprehensive data extraction and proper error handling.
+    
+    Key features:
+    - Fixed image format validation issues
+    - Enhanced data extraction with explicit completeness checks
+    - Better prompts to capture ALL visible values
+    - Improved summary generation
+    - Splits dashboard-like pages into individual charts
+    - Filters out UI elements (headers, search bars, nav)
+    - Better Gantt chart extraction with axis alignment
+    - Handles full-page schematics as single visuals
+    """
 
-        Key improvements:
-        - Splits dashboard-like pages into individual charts
-        - Filters out UI elements (headers, search bars, nav)
-        - Better Gantt chart extraction with axis alignment
-        - Handles full-page schematics as single visuals
-        - Filters component labels and sub-blocks
-        - Saves rejected visuals for debugging
-        """
+    MAX_CONCURRENT_GEMINI_CALLS = 1
 
-        MAX_CONCURRENT_GEMINI_CALLS = 1
+    VISUAL_TYPES = [
+        "chart", "bar_chart", "line_chart", "pie_chart", "scatter_chart",
+        "flow_diagram", "flowchart", "process_diagram", "workflow_diagram",
+        "gantt_chart", "timeline", "schedule",
+        "logo", "brand_mark", "company_logo",
+        "signature", "handwritten_signature",
+        "map", "geographical_map", "location_map",
+        "infographic", "illustration", "diagram",
+        "graph", "network_diagram", "tree_diagram",
+        "architectural_diagram", "technical_drawing",
+        "organizational_chart", "hierarchy_chart",
+        "venn_diagram", "bubble_chart", "heatmap",
+        "screenshot", "image", "photo", "network diagram",
+        "circuit_diagram", "wiring_diagram", "electrical_schematic",
+        "power_distribution_diagram", "system_diagram", "avionics_schematic"
+    ]
 
-        VISUAL_TYPES = [
-            "chart", "bar_chart", "line_chart", "pie_chart", "scatter_chart",
-            "flow_diagram", "flowchart", "process_diagram", "workflow_diagram",
-            "gantt_chart", "timeline", "schedule",
-            "logo", "brand_mark", "company_logo",
-            "signature", "handwritten_signature",
-            "map", "geographical_map", "location_map",
-            "infographic", "illustration", "diagram",
-            "graph", "network_diagram", "tree_diagram",
-            "architectural_diagram", "technical_drawing",
-            "organizational_chart", "hierarchy_chart",
-            "venn_diagram", "bubble_chart", "heatmap",
-            "screenshot", "image", "photo", "network diagram",
-            "circuit_diagram", "wiring_diagram", "electrical_schematic",
-            "power_distribution_diagram", "system_diagram", "avionics_schematic"
-        ]
+    UI_REJECT_KEYWORDS = [
+        "search bar", "navigation", "header", "footer", "menu", "toolbar",
+        "button", "input field", "text box", "dropdown", "filter", "search box",
+        "nav bar", "top bar", "title bar", "sidebar", "control panel"
+    ]
 
-        UI_REJECT_KEYWORDS = [
-            "search bar", "navigation", "header", "footer", "menu", "toolbar",
-            "button", "input field", "text box", "dropdown", "filter", "search box",
-            "nav bar", "top bar", "title bar", "sidebar", "control panel"
-        ]
+    def __init__(self):
+        self.client = genai.Client(api_key=Config.GEMINI_API_KEY)
+        self.output_dir = Path("visuals")
+        self.output_dir.mkdir(exist_ok=True)
+        self.rejected_dir = self.output_dir / "rejected"
+        self.rejected_dir.mkdir(exist_ok=True)
+        self.request_count = 0
+        self.last_request_time = 0
+        self.processed_logos = set()
+        self.semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_GEMINI_CALLS)
 
-        def __init__(self):
-            genai.configure(api_key=Config.GEMINI_API_KEY)
-            self.model = genai.GenerativeModel(Config.GEMINI_MODEL)
-            self.output_dir = Path("visuals")
-            self.output_dir.mkdir(exist_ok=True)
-            self.rejected_dir = self.output_dir / "rejected"
-            self.rejected_dir.mkdir(exist_ok=True)
-            self.request_count = 0
-            self.last_request_time = 0
-            self.processed_logos = set()
-            self.semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_GEMINI_CALLS)
+        self.counters = {
+            "cv_candidates": 0,
+            "rejected_too_small": 0,
+            "rejected_gemini": 0,
+            "rejected_table_cv": 0,
+            "rejected_table_text": 0,
+            "rejected_ui_element": 0,
+            "validated_visuals": 0,
+            "skipped_duplicate_logo": 0,
+            "noise_rejected": 0,
+            "total_requests": 0,
+            "dashboard_splits": 0,
+            "schematic_detected": 0,
+            "component_blocks_filtered": 0
+        }
 
-            # Counters for diagnostics
-            self.counters = {
-                "cv_candidates": 0,
-                "rejected_too_small": 0,
-                "rejected_gemini": 0,
-                "rejected_table_cv": 0,
-                "rejected_table_text": 0,
-                "rejected_ui_element": 0,
-                "validated_visuals": 0,
-                "skipped_duplicate_logo": 0,
-                "noise_rejected": 0,
-                "total_requests": 0,
-                "dashboard_splits": 0,
-                "schematic_detected": 0,
-                "component_blocks_filtered": 0
-            }
+        print(f"[ImageDetector] Initialized with model: {Config.GEMINI_MODEL}")
+        print(f"[ImageDetector] Output directory: {self.output_dir.absolute()}")
+        print(f"[ImageDetector] Rejected directory: {self.rejected_dir.absolute()}")
 
-            print(f"[ImageDetector] Initialized with model: {Config.GEMINI_MODEL}")
-            print(
-                f"[ImageDetector] Output directory: {self.output_dir.absolute()}")
-            print(
-                f"[ImageDetector] Rejected directory: {self.rejected_dir.absolute()}")
-            print(
-                f"[ImageDetector] Max concurrent Gemini calls: {self.MAX_CONCURRENT_GEMINI_CALLS}")
+    def _image_to_bytes(self, image: Image.Image, format: str = 'PNG') -> bytes:
+        """Convert PIL Image to bytes properly."""
+        img_byte_arr = io.BytesIO()
+        if image.mode not in ('RGB', 'RGBA'):
+            image = image.convert('RGB')
+        image.save(img_byte_arr, format=format)
+        img_byte_arr.seek(0)
+        return img_byte_arr.getvalue()
+    async def _rate_limit_async(self):
+        """Simple rate limiter to avoid overloading Gemini API."""
+        async with self.semaphore:
+            # optional delay between requests
+            await asyncio.sleep(0.1)  # 100ms delay
 
-        # -----------------------
-        # Public methods
-        # -----------------------
-        async def detect_images(
-            self,
-            page_image: Image.Image,
-            page_number: int,
-            pdf_path: str = None,
-            usage_tracker: LLMUsageTracker = None
-        ) -> List[Dict]:
-            """
-            Detect and analyze visuals on a single page image.
-            Returns validated visuals (list of dicts).
-            """
-            print(f"\n[ImageDetector] Processing page {page_number}...")
+    async def detect_images(
+        self,
+        page_image: Image.Image,
+        page_number: int,
+        pdf_path: str = None,
+        usage_tracker: LLMUsageTracker = None
+    ) -> List[Dict]:
+        """Detect and analyze visuals on a single page image."""
+        print(f"\n[ImageDetector] Processing page {page_number}...")
 
-            # First check if this is a full-page schematic
-            schematic_check = await self._check_full_page_schematic(
-                page_image, page_number, usage_tracker
-            )
+        # Check if full-page schematic
+        schematic_check = await self._check_full_page_schematic(
+            page_image, page_number, usage_tracker
+        )
 
-            if schematic_check["is_schematic"]:
-                print(
-                    f"[ImageDetector] Full-page schematic detected on page {page_number}")
-                self.counters["schematic_detected"] += 1
+        if schematic_check["is_schematic"]:
+            print(f"[ImageDetector] Full-page schematic detected on page {page_number}")
+            self.counters["schematic_detected"] += 1
 
-                doc_name = Path(
-                    pdf_path).stem if pdf_path else f"document_{int(time.time())}"
-                doc_folder = self.output_dir / doc_name / "visuals"
-                doc_folder.mkdir(parents=True, exist_ok=True)
-
-                # Process entire page as single visual
-                visual_record = await self._process_full_page_schematic(
-                    page_image, page_number, doc_folder, schematic_check, usage_tracker
-                )
-
-                if visual_record:
-                    return [visual_record]
-                else:
-                    return []
-
-            # Not a schematic - proceed with normal detection
-            regions = self._detect_visual_regions_cv(page_image, page_number)
-            self.counters["cv_candidates"] += len(regions)
-
-            if not regions:
-                print(f"[ImageDetector] No CV candidates on page {page_number}")
-                return []
-
-            doc_name = Path(
-                pdf_path).stem if pdf_path else f"document_{int(time.time())}"
+            doc_name = Path(pdf_path).stem if pdf_path else f"document_{int(time.time())}"
             doc_folder = self.output_dir / doc_name / "visuals"
             doc_folder.mkdir(parents=True, exist_ok=True)
 
-            rejected_folder = self.rejected_dir / doc_name
-            rejected_folder.mkdir(parents=True, exist_ok=True)
-
-            # Check if this is a dashboard page (multiple large regions)
-            regions = await self._handle_dashboard_page(
-                regions, page_image, page_number, doc_folder, rejected_folder, usage_tracker
+            visual_record = await self._process_full_page_schematic(
+                page_image, page_number, doc_folder, schematic_check, usage_tracker
             )
 
-            # Create tasks for processing each region
-            tasks = [
-                self._process_single_visual(
-                    region, idx, page_number, page_image, doc_folder, rejected_folder, usage_tracker)
-                for idx, region in enumerate(regions, start=1)
-            ]
+            return [visual_record] if visual_record else []
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Normal detection
+        regions = self._detect_visual_regions_cv(page_image, page_number)
+        self.counters["cv_candidates"] += len(regions)
 
-            validated_visuals = []
-            for res in results:
-                if isinstance(res, dict) and res:
-                    validated_visuals.append(res)
-                elif isinstance(res, Exception):
-                    print(f"[ImageDetector] Error in processing task: {res}")
+        if not regions:
+            print(f"[ImageDetector] No CV candidates on page {page_number}")
+            return []
 
-            print(
-                f"[ImageDetector] Page {page_number} done. Validated visuals: {len(validated_visuals)}")
-            return validated_visuals
+        doc_name = Path(pdf_path).stem if pdf_path else f"document_{int(time.time())}"
+        doc_folder = self.output_dir / doc_name / "visuals"
+        doc_folder.mkdir(parents=True, exist_ok=True)
 
-        # -----------------------
-        # Schematic detection and handling
-        # -----------------------
-        async def _check_full_page_schematic(
-            self,
-            page_image: Image.Image,
-            page_number: int,
-            usage_tracker: LLMUsageTracker = None
-        ) -> Dict:
-            """
-            Check if the entire page is a technical schematic/circuit diagram.
-            Returns dict with is_schematic, type, title, figure_number.
-            """
-            await self._rate_limit_async()
+        rejected_folder = self.rejected_dir / doc_name
+        rejected_folder.mkdir(parents=True, exist_ok=True)
 
-            prompt = """Analyze this entire page and determine if it's a TECHNICAL SCHEMATIC/DIAGRAM.
+        # Handle dashboard pages
+        regions = await self._handle_dashboard_page(
+            regions, page_image, page_number, doc_folder, rejected_folder, usage_tracker
+        )
 
-    A TECHNICAL SCHEMATIC is:
-    - Circuit diagram, wiring diagram, electrical schematic
-    - Power distribution diagram, system diagram
-    - Avionics schematic, control system diagram
-    - Network topology diagram with interconnected components
-    - Shows connections, wiring, signal flow between components
-    - Usually spans the entire page as one unified technical drawing
-    - Contains component labels, connection lines, symbols
+        # Process regions
+        tasks = [
+            self._process_single_visual(
+                region, idx, page_number, page_image, doc_folder, rejected_folder, usage_tracker)
+            for idx, region in enumerate(regions, start=1)
+        ]
 
-    NOT a schematic:
-    - Dashboard with multiple separate charts
-    - Flowchart or process diagram (use standard diagram type)
-    - Organization chart
-    - Simple block diagram without technical connections
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    If this IS a technical schematic:
-    1. Extract the FIGURE NUMBER if visible (e.g., "Figure 002", "Fig. 2", "FIG-001")
-    2. Extract the TITLE/DESCRIPTION (e.g., "ADIRS - Power Supply Distribution", "Hydraulic System Schematic")
-    3. Identify the schematic type
+        validated_visuals = []
+        for res in results:
+            if isinstance(res, dict) and res:
+                validated_visuals.append(res)
+            elif isinstance(res, Exception):
+                print(f"[ImageDetector] Error in processing task: {res}")
 
-    Return ONLY JSON:
-    {
-    "is_schematic": true/false,
-    "schematic_type": "circuit_diagram" or "wiring_diagram" or "power_distribution_diagram" etc.,
-    "figure_number": "Figure 002" or null,
-    "title": "Full title text" or null,
-    "reason": "brief explanation"
-    }
-    """
+        print(f"[ImageDetector] Page {page_number} done. Validated visuals: {len(validated_visuals)}")
+        return validated_visuals
 
-            try:
-                if usage_tracker:
-                    usage_tracker.start_request(prompt)
+    async def _check_full_page_schematic(
+        self,
+        page_image: Image.Image,
+        page_number: int,
+        usage_tracker: LLMUsageTracker = None
+    ) -> Dict:
+        """Check if the entire page is a technical schematic."""
+        await self._rate_limit_async()
 
-                response = self.model.generate_content([prompt, page_image])
+        prompt = """Analyze this entire page and determine if it's a TECHNICAL SCHEMATIC/DIAGRAM.
 
-                if usage_tracker:
-                    usage_tracker.end_request(response)
+A TECHNICAL SCHEMATIC is:
+- Circuit diagram, wiring diagram, electrical schematic
+- Power distribution diagram, system diagram
+- Avionics schematic, control system diagram
+- Network topology diagram with interconnected components
+- Shows connections, wiring, signal flow between components
+- Usually spans the entire page as one unified technical drawing
+- Contains component labels, connection lines, symbols
 
-                result_text = response.text.strip()
+NOT a schematic:
+- Dashboard with multiple separate charts
+- Flowchart or process diagram (use standard diagram type)
+- Organization chart
+- Simple block diagram without technical connections
 
-                # Extract JSON
-                if "```" in result_text:
-                    parts = result_text.split("```")
-                    for part in parts:
-                        if part.strip().startswith("json"):
-                            result_text = part[4:].strip()
-                            break
+If this IS a technical schematic:
+1. Extract the FIGURE NUMBER if visible (e.g., "Figure 002", "Fig. 2", "FIG-001")
+2. Extract the TITLE/DESCRIPTION (e.g., "ADIRS - Power Supply Distribution")
+3. Identify the schematic type
 
-                result = json.loads(result_text)
+Return ONLY JSON:
+{
+  "is_schematic": true/false,
+  "schematic_type": "circuit_diagram" or "wiring_diagram" or "power_distribution_diagram" etc.,
+  "figure_number": "Figure 002" or null,
+  "title": "Full title text" or null,
+  "reason": "brief explanation"
+}
+"""
 
-                print(
-                    f"[ImageDetector] Schematic check result: {result.get('is_schematic')} - {result.get('reason')}")
+        try:
+            if usage_tracker:
+                usage_tracker.start_request(prompt)
 
-                return result
+            image_bytes = self._image_to_bytes(page_image)
 
-            except Exception as e:
-                print(f"[ImageDetector] Error in schematic detection: {e}")
-                return {"is_schematic": False, "reason": "error"}
-
-        async def _process_full_page_schematic(
-            self,
-            page_image: Image.Image,
-            page_number: int,
-            doc_folder: Path,
-            schematic_info: Dict,
-            usage_tracker: LLMUsageTracker = None
-        ) -> Optional[Dict]:
-            """
-            Process a full-page schematic as a single visual.
-            """
-            visual_id = f"visual_{page_number}.1"
-            print(
-                f"\n[ImageDetector] Processing full-page schematic {visual_id}...")
-
-            # Get detailed analysis
-            analysis = await self._analyze_schematic_with_gemini(
-                page_image, visual_id, page_number, schematic_info, usage_tracker
+            response = self.client.models.generate_content(
+                model=Config.GEMINI_MODEL,
+                contents=[
+                    types.Part(text=prompt),
+                    types.Part(inline_data=types.Blob(
+                        mime_type="image/png",
+                        data=image_bytes
+                    ))
+                ]
             )
 
-            if not analysis:
-                print(f"[ImageDetector] ✗ {visual_id} schematic analysis failed")
-                return None
+            if usage_tracker:
+                usage_tracker.end_request(response)
 
-            # Save the full page image
-            visual_path = doc_folder / f"{visual_id}.png"
-            try:
-                page_image.save(visual_path, "PNG")
-            except Exception as e:
-                print(f"[ImageDetector] Error saving {visual_id}: {e}")
-                return None
+            result_text = response.text.strip()
 
-            # Full page bbox in percent
-            bbox_percent = [0.0, 0.0, 100.0, 100.0]
+            # Extract JSON
+            if "```" in result_text:
+                parts = result_text.split("```")
+                for part in parts:
+                    if part.strip().startswith("json"):
+                        result_text = part[4:].strip()
+                        break
+                    elif part.strip() and not part.strip().startswith("```"):
+                        result_text = part.strip()
+                        break
 
-            # Build visual record
-            visual_record = {
-                "visual_id": visual_id,
-                "page_number": page_number,
-                "bbox": bbox_percent,
-                "type": schematic_info.get("schematic_type", "circuit_diagram"),
-                "figure_number": schematic_info.get("figure_number"),
-                "title": schematic_info.get("title"),
-                "summary": analysis.get("summary"),
-                "data": analysis.get("data", {}),
-                "tokens": {
-                    "input": analysis.get("input_tokens", 0),
-                    "output": analysis.get("output_tokens", 0)
-                },
-                "file_path": str(visual_path),
-                "is_full_page_schematic": True
-            }
+            result = json.loads(result_text)
+            print(f"[ImageDetector] Schematic check: {result.get('is_schematic')} - {result.get('reason')}")
+            return result
 
-            self.counters["validated_visuals"] += 1
-            print(
-                f"[ImageDetector] ✓ {visual_id} full-page schematic validated and saved -> {visual_path.name}")
-            if schematic_info.get("figure_number"):
-                print(f"  Figure: {schematic_info.get('figure_number')}")
-            if schematic_info.get("title"):
-                print(f"  Title: {schematic_info.get('title')}")
+        except Exception as e:
+            print(f"[ImageDetector] Error in schematic detection: {e}")
+            return {"is_schematic": False, "reason": "error"}
 
-            return visual_record
+    async def _process_full_page_schematic(
+        self,
+        page_image: Image.Image,
+        page_number: int,
+        doc_folder: Path,
+        schematic_info: Dict,
+        usage_tracker: LLMUsageTracker = None
+    ) -> Optional[Dict]:
+        """Process a full-page schematic as a single visual."""
+        visual_id = f"visual_{page_number}.1"
+        print(f"\n[ImageDetector] Processing full-page schematic {visual_id}...")
 
-        async def _analyze_schematic_with_gemini(
-            self,
-            schematic_image: Image.Image,
-            visual_id: str,
-            page_number: int,
-            schematic_info: Dict,
-            usage_tracker: LLMUsageTracker = None
-        ) -> Optional[Dict]:
-            """
-            Analyze a technical schematic in detail.
-            """
-            await self._rate_limit_async()
+        analysis = await self._analyze_schematic_with_gemini(
+            page_image, visual_id, page_number, schematic_info, usage_tracker
+        )
 
-            schematic_type = schematic_info.get(
-                "schematic_type", "circuit_diagram")
-            figure_num = schematic_info.get("figure_number", "Unknown")
-            title = schematic_info.get("title", "Unknown")
+        if not analysis:
+            print(f"[ImageDetector] ✗ {visual_id} schematic analysis failed")
+            return None
 
-            prompt = f"""Analyze this technical schematic/diagram in detail.
+        visual_path = doc_folder / f"{visual_id}.png"
+        try:
+            page_image.save(visual_path, "PNG")
+        except Exception as e:
+            print(f"[ImageDetector] Error saving {visual_id}: {e}")
+            return None
 
-    Schematic Type: {schematic_type}
-    Figure Number: {figure_num}
-    Title: {title}
-    Visual ID: {visual_id}
-    Page: {page_number}
+        bbox_percent = [0.0, 0.0, 100.0, 100.0]
 
-    Provide a detailed analysis:
+        visual_record = {
+            "visual_id": visual_id,
+            "page_number": page_number,
+            "bbox": bbox_percent,
+            "type": schematic_info.get("schematic_type", "circuit_diagram"),
+            "figure_number": schematic_info.get("figure_number"),
+            "title": schematic_info.get("title"),
+            "summary": analysis.get("summary"),
+            "data": analysis.get("data", {}),
+            "tokens": {
+                "input": analysis.get("input_tokens", 0),
+                "output": analysis.get("output_tokens", 0)
+            },
+            "file_path": str(visual_path),
+            "is_full_page_schematic": True
+        }
 
-    1. **Main Components**: List the major components, modules, or systems shown (e.g., ADIRU 1, ADIRU 2, ADIRU 3, relays, power supplies)
+        self.counters["validated_visuals"] += 1
+        print(f"[ImageDetector] ✓ {visual_id} validated -> {visual_path.name}")
+        if schematic_info.get("figure_number"):
+            print(f"  Figure: {schematic_info.get('figure_number')}")
+        if schematic_info.get("title"):
+            print(f"  Title: {schematic_info.get('title')}")
 
-    2. **Connections**: Describe the main connections, signal flows, or power distribution paths
+        return visual_record
 
-    3. **Labels and Identifiers**: Extract key labels, component IDs, pin numbers, wire labels (e.g., 4DA3, 3DA3, 5FP3, 8FP, NORM, CAPT/3, ATT HDG)
+    async def _analyze_schematic_with_gemini(
+        self,
+        schematic_image: Image.Image,
+        visual_id: str,
+        page_number: int,
+        schematic_info: Dict,
+        usage_tracker: LLMUsageTracker = None
+    ) -> Optional[Dict]:
+        """Analyze a technical schematic in complete detail."""
+        await self._rate_limit_async()
 
-    4. **Functional Description**: Briefly describe what this schematic represents and its purpose
+        schematic_type = schematic_info.get("schematic_type", "circuit_diagram")
+        figure_num = schematic_info.get("figure_number", "Unknown")
+        title = schematic_info.get("title", "Unknown")
 
-    5. **Key Details**: Any important notes, test points, relay positions, or operational modes shown
+        prompt = f"""Analyze this technical schematic/diagram in COMPLETE detail. Extract EVERY visible element.
 
-    Return ONLY JSON:
-    {{
-    "summary": "2-3 sentence overview of the schematic",
-    "data": {{
-        "main_components": ["component1", "component2", ...],
-        "connections": ["connection description 1", "connection description 2", ...],
-        "labels": ["label1", "label2", ...],
-        "functional_description": "What this system does",
-        "key_details": ["detail1", "detail2", ...]
-    }}
-    }}
-    """
+Schematic Type: {schematic_type}
+Figure Number: {figure_num}
+Title: {title}
+Visual ID: {visual_id}
+Page: {page_number}
 
-            try:
-                if usage_tracker:
-                    usage_tracker.start_request(prompt)
+CRITICAL: Extract ALL visible data. Do not summarize or skip any elements.
 
-                response = self.model.generate_content([prompt, schematic_image])
+Provide comprehensive analysis:
 
-                if usage_tracker:
-                    usage_tracker.end_request(response)
+1. **Main Components**: List EVERY component, module, or system shown
+   - Include ALL identifiers (ADIRU 1, ADIRU 2, relays, power supplies, etc.)
+   - Include component types and models if visible
 
-                result_text = response.text.strip()
+2. **Connections**: Describe ALL connections, signal flows, power distribution paths
+   - Document source → destination for each connection
+   - Include connection types (power, signal, data, etc.)
 
-                # Extract JSON
-                if "```" in result_text:
-                    parts = result_text.split("```")
-                    for part in parts:
-                        if part.strip().startswith("json"):
-                            result_text = part[4:].strip()
-                            break
+3. **Labels and Identifiers**: Extract EVERY label, component ID, pin number, wire label
+   - Include ALL text visible (4DA3, 3DA3, 5FP3, 8FP, NORM, CAPT/3, ATT HDG, etc.)
+   - Document wire colors, numbers, routing information
 
-                result = json.loads(result_text)
+4. **Functional Description**: Describe system purpose and operation
+   - Explain the system operation
+   - Document operational modes if shown
 
-                # Attach token info
-                if hasattr(response, "usage_metadata"):
-                    result["input_tokens"] = getattr(
-                        response.usage_metadata, "prompt_token_count", 0)
-                    result["output_tokens"] = getattr(
-                        response.usage_metadata, "candidates_token_count", 0)
-                else:
-                    result["input_tokens"] = 0
-                    result["output_tokens"] = 0
+5. **Key Details**: Extract ALL:
+   - Test points and measurement locations
+   - Relay positions and states
+   - Operational modes and configurations
+   - Voltage levels, current ratings
+   - Safety notes or warnings
+   - Reference designators
 
-                return result
+6. **Spatial Layout**: Describe physical arrangement of components
 
-            except Exception as e:
-                print(
-                    f"[ImageDetector] Error analyzing schematic {visual_id}: {e}")
-                return None
+Return ONLY JSON with COMPLETE data:
+{{
+  "summary": "Comprehensive 3-5 sentence overview including purpose, key components, and functionality",
+  "data": {{
+    "main_components": ["component1 with full details", "component2 with full details", ...],
+    "connections": ["complete connection description 1", "connection 2", ...],
+    "labels": ["ALL labels extracted", ...],
+    "wire_identifiers": ["ALL wire labels and colors", ...],
+    "functional_description": "Complete explanation of system purpose and operation",
+    "key_details": ["ALL test points", "ALL relay info", "ALL voltage/current specs", ...],
+    "operational_modes": ["mode1", "mode2", ...],
+    "layout_description": "Description of physical arrangement"
+  }}
+}}
+"""
 
-        # -----------------------
-        # Dashboard detection and splitting
-        # -----------------------
-        async def _handle_dashboard_page(
-            self,
-            regions: List[Dict],
-            page_image: Image.Image,
-            page_number: int,
-            doc_folder: Path,
-            rejected_folder: Path,
-            usage_tracker: LLMUsageTracker = None
-        ) -> List[Dict]:
-            """
-            Detect if page is a dashboard with multiple charts and split if needed.
-            Returns updated regions list.
-            """
-            if not regions:
-                return regions
+        try:
+            if usage_tracker:
+                usage_tracker.start_request(prompt)
 
-            # Check if we have a very large region (>70% of page) with multiple visual clusters
-            page_area = page_image.width * page_image.height
-            large_regions = [r for r in regions if r['area'] > page_area * 0.70]
+            image_bytes = self._image_to_bytes(schematic_image)
 
-            if not large_regions:
-                return regions
+            response = self.client.models.generate_content(
+                model=Config.GEMINI_MODEL,
+                contents=[
+                    types.Part(text=prompt),
+                    types.Part(inline_data=types.Blob(
+                        mime_type="image/png",
+                        data=image_bytes
+                    ))
+                ]
+            )
 
-            large_region = large_regions[0]
+            if usage_tracker:
+                usage_tracker.end_request(response)
 
-            # First check: is this truly a dashboard or a single full-page visual?
-            cropped = self._crop_region_pixels(page_image, large_region['bbox'])
-            is_dashboard = await self._is_dashboard_layout(cropped, page_number, usage_tracker)
+            result_text = response.text.strip()
 
-            if not is_dashboard:
-                print(
-                    f"[ImageDetector] Large region is a single full-page visual, not splitting")
-                return regions
+            if "```" in result_text:
+                parts = result_text.split("```")
+                for part in parts:
+                    if part.strip().startswith("json"):
+                        result_text = part[4:].strip()
+                        break
 
-            print(
-                f"[ImageDetector] Dashboard detected, attempting to split into individual charts...")
-            self.counters["dashboard_splits"] += 1
+            result = json.loads(result_text)
 
-            # Split the large region into sub-regions
-            sub_regions = self._split_dashboard_region(
-                page_image, large_region['bbox'])
+            if hasattr(response, "usage_metadata"):
+                result["input_tokens"] = getattr(response.usage_metadata, "prompt_token_count", 0)
+                result["output_tokens"] = getattr(response.usage_metadata, "candidates_token_count", 0)
+            else:
+                result["input_tokens"] = 0
+                result["output_tokens"] = 0
 
-            if len(sub_regions) > 1:
-                print(
-                    f"[ImageDetector] Split dashboard into {len(sub_regions)} sub-regions")
-                # Remove the original large region and add sub-regions
-                regions = [r for r in regions if r != large_region]
-                regions.extend(sub_regions)
+            return result
 
+        except Exception as e:
+            print(f"[ImageDetector] Error analyzing schematic {visual_id}: {e}")
+            return None
+
+    async def _handle_dashboard_page(
+        self,
+        regions: List[Dict],
+        page_image: Image.Image,
+        page_number: int,
+        doc_folder: Path,
+        rejected_folder: Path,
+        usage_tracker: LLMUsageTracker = None
+    ) -> List[Dict]:
+        """Detect if page is a dashboard with multiple charts and split if needed."""
+        if not regions:
             return regions
 
-        async def _is_dashboard_layout(
-            self,
-            image: Image.Image,
-            page_number: int,
-            usage_tracker: LLMUsageTracker = None
-        ) -> bool:
-            """
-            Use Gemini to determine if an image is a dashboard with multiple charts
-            or a single full-page visual.
-            """
-            await self._rate_limit_async()
+        page_area = page_image.width * page_image.height
+        large_regions = [r for r in regions if r['area'] > page_area * 0.70]
 
-            prompt = """Analyze this image and determine if it's a DASHBOARD or a SINGLE VISUAL.
+        if not large_regions:
+            return regions
 
-    A DASHBOARD contains:
-    - Multiple separate charts/graphs side by side or stacked
-    - Different data visualizations in distinct sections
-    - Clear visual separation between components
+        large_region = large_regions[0]
+        cropped = self._crop_region_pixels(page_image, large_region['bbox'])
+        is_dashboard = await self._is_dashboard_layout(cropped, page_number, usage_tracker)
 
-    A SINGLE VISUAL is:
-    - One unified chart/diagram/infographic
-    - One Gantt chart (even if large)
-    - One flowchart or process diagram
-    - One map or illustration
-    - One circuit/wiring diagram or schematic (even if complex)
+        if not is_dashboard:
+            print(f"[ImageDetector] Large region is single visual, not splitting")
+            return regions
 
-    Return ONLY JSON:
-    {"is_dashboard": true/false, "reason": "brief explanation"}
-    """
+        print(f"[ImageDetector] Dashboard detected, splitting...")
+        self.counters["dashboard_splits"] += 1
 
-            try:
-                if usage_tracker:
-                    usage_tracker.start_request(prompt)
+        sub_regions = self._split_dashboard_region(page_image, large_region['bbox'])
 
-                response = self.model.generate_content([prompt, image])
+        if len(sub_regions) > 1:
+            print(f"[ImageDetector] Split into {len(sub_regions)} sub-regions")
+            regions = [r for r in regions if r != large_region]
+            regions.extend(sub_regions)
 
-                if usage_tracker:
-                    usage_tracker.end_request(response)
+        return regions
 
-                result_text = response.text.strip()
+    async def _is_dashboard_layout(
+        self,
+        image: Image.Image,
+        page_number: int,
+        usage_tracker: LLMUsageTracker = None
+    ) -> bool:
+        """Determine if image is a dashboard with multiple charts."""
+        await self._rate_limit_async()
 
-                # Extract JSON
-                if "```" in result_text:
-                    parts = result_text.split("```")
-                    for part in parts:
-                        if part.strip().startswith("json"):
-                            result_text = part[4:].strip()
-                            break
+        prompt = """Analyze this image and determine if it's a DASHBOARD or a SINGLE VISUAL.
 
-                result = json.loads(result_text)
-                is_dash = result.get("is_dashboard", False)
-                reason = result.get("reason", "")
+A DASHBOARD contains:
+- Multiple separate charts/graphs side by side or stacked
+- Different data visualizations in distinct sections
+- Clear visual separation between components
 
-                print(f"[ImageDetector] Dashboard check: {is_dash} - {reason}")
-                return is_dash
+A SINGLE VISUAL is:
+- One unified chart/diagram/infographic
+- One Gantt chart (even if large)
+- One flowchart or process diagram
+- One map or illustration
+- One circuit/wiring diagram or schematic (even if complex)
 
-            except Exception as e:
-                print(f"[ImageDetector] Error in dashboard detection: {e}")
-                return False
+Return ONLY JSON:
+{"is_dashboard": true/false, "reason": "brief explanation"}
+"""
 
-        def _split_dashboard_region(self, page_image: Image.Image, bbox: List[int]) -> List[Dict]:
-            """
-            Split a dashboard region into individual chart regions using visual clustering.
-            """
-            x1, y1, x2, y2 = bbox
-            crop = page_image.crop((x1, y1, x2, y2))
-            img_cv = cv2.cvtColor(np.array(crop.convert("RGB")), cv2.COLOR_RGB2BGR)
-            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        try:
+            if usage_tracker:
+                usage_tracker.start_request(prompt)
 
-            # Use adaptive thresholding to find content regions
-            thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                        cv2.THRESH_BINARY_INV, 21, 10)
+            image_bytes = self._image_to_bytes(image)
 
-            # Find connected components
-            kernel = np.ones((15, 15), np.uint8)
-            dilated = cv2.dilate(thresh, kernel, iterations=3)
+            response = self.client.models.generate_content(
+                model=Config.GEMINI_MODEL,
+                contents=[
+                    types.Part(text=prompt),
+                    types.Part(inline_data=types.Blob(
+                        mime_type="image/png",
+                        data=image_bytes
+                    ))
+                ]
+            )
 
-            contours, _ = cv2.findContours(
-                dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if usage_tracker:
+                usage_tracker.end_request(response)
 
-            sub_regions = []
-            crop_h, crop_w = gray.shape
-            # At least 5% of the cropped region
-            min_area = (crop_w * crop_h) * 0.05
+            result_text = response.text.strip()
 
-            for contour in contours:
-                cx, cy, cw, ch = cv2.boundingRect(contour)
-                area = cw * ch
+            if "```" in result_text:
+                parts = result_text.split("```")
+                for part in parts:
+                    if part.strip().startswith("json"):
+                        result_text = part[4:].strip()
+                        break
 
-                if area > min_area and cw > 100 and ch > 100:
-                    # Convert back to page coordinates
-                    abs_x1 = x1 + cx
-                    abs_y1 = y1 + cy
-                    abs_x2 = x1 + cx + cw
-                    abs_y2 = y1 + cy + ch
+            result = json.loads(result_text)
+            is_dash = result.get("is_dashboard", False)
+            reason = result.get("reason", "")
 
-                    sub_regions.append({
-                        'bbox': [abs_x1, abs_y1, abs_x2, abs_y2],
-                        'area': area,
-                        'confidence': 1.0,
-                        'method': 'dashboard_split'
-                    })
+            print(f"[ImageDetector] Dashboard check: {is_dash} - {reason}")
+            return is_dash
 
-            # Sort by position (top to bottom, left to right)
-            sub_regions.sort(key=lambda r: (r['bbox'][1], r['bbox'][0]))
+        except Exception as e:
+            print(f"[ImageDetector] Error in dashboard detection: {e}")
+            return False
 
-            return sub_regions if len(sub_regions) > 1 else []
+    def _split_dashboard_region(self, page_image: Image.Image, bbox: List[int]) -> List[Dict]:
+        """Split dashboard region into individual charts."""
+        x1, y1, x2, y2 = bbox
+        crop = page_image.crop((x1, y1, x2, y2))
+        img_cv = cv2.cvtColor(np.array(crop.convert("RGB")), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-        # -----------------------
-        # Single visual processing
-        # -----------------------
-        async def _process_single_visual(
-            self,
-            region: Dict,
-            idx: int,
-            page_number: int,
-            page_image: Image.Image,
-            doc_folder: Path,
-            rejected_folder: Path,
-            usage_tracker: LLMUsageTracker = None
-        ) -> Optional[Dict]:
-            visual_id = f"visual_{page_number}.{idx}"
-            print(f"\n[ImageDetector] Processing {visual_id}...")
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 21, 10)
 
-            cropped_visual = self._crop_region_pixels(page_image, region['bbox'])
+        kernel = np.ones((15, 15), np.uint8)
+        dilated = cv2.dilate(thresh, kernel, iterations=3)
 
-            # Reject tiny regions early
-            min_width, min_height = 50, 50
-            if cropped_visual.width < min_width or cropped_visual.height < min_height:
-                self.counters["rejected_too_small"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "too_small")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected (too small: {cropped_visual.width}x{cropped_visual.height})")
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        sub_regions = []
+        crop_h, crop_w = gray.shape
+        min_area = (crop_w * crop_h) * 0.05
+
+        for contour in contours:
+            cx, cy, cw, ch = cv2.boundingRect(contour)
+            area = cw * ch
+
+            if area > min_area and cw > 100 and ch > 100:
+                abs_x1 = x1 + cx
+                abs_y1 = y1 + cy
+                abs_x2 = x1 + cx + cw
+                abs_y2 = y1 + cy + ch
+
+                sub_regions.append({
+                    'bbox': [abs_x1, abs_y1, abs_x2, abs_y2],
+                    'area': area,
+                    'confidence': 1.0,
+                    'method': 'dashboard_split'
+                })
+
+        sub_regions.sort(key=lambda r: (r['bbox'][1], r['bbox'][0]))
+        return sub_regions if len(sub_regions) > 1 else []
+
+    async def _process_single_visual(
+        self,
+        region: Dict,
+        idx: int,
+        page_number: int,
+        page_image: Image.Image,
+        doc_folder: Path,
+        rejected_folder: Path,
+        usage_tracker: LLMUsageTracker = None
+    ) -> Optional[Dict]:
+        """Process a single visual region."""
+        visual_id = f"visual_{page_number}.{idx}"
+        print(f"\n[ImageDetector] Processing {visual_id}...")
+
+        cropped_visual = self._crop_region_pixels(page_image, region['bbox'])
+
+        min_width, min_height = 50, 50
+        if cropped_visual.width < min_width or cropped_visual.height < min_height:
+            self.counters["rejected_too_small"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "too_small")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (too small)")
+            return None
+
+        if self._is_component_block(cropped_visual):
+            self.counters["component_blocks_filtered"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "component_block")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (component block)")
+            return None
+
+        async with self.semaphore:
+            analysis = await self._analyze_visual_with_gemini(
+                cropped_visual, visual_id, page_number, usage_tracker
+            )
+
+        if not analysis:
+            self.counters["rejected_gemini"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "no_analysis")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (no analysis)")
+            return None
+
+        if not analysis.get("is_valid_visual", False):
+            self.counters["rejected_gemini"] += 1
+            reason = analysis.get("reason", "Unknown")
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, f"gemini_{reason}")
+            print(f"[ImageDetector] ✗ {visual_id} rejected by Gemini: {reason}")
+            return None
+
+        visual_type = (analysis.get("type") or "").lower()
+        summary = (analysis.get("summary") or "").lower()
+
+        if self._is_ui_element(visual_type, summary):
+            self.counters["rejected_ui_element"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "ui_element")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (UI element)")
+            return None
+
+        if any(logo_key in visual_type for logo_key in ["logo", "brand_mark", "company_logo"]):
+            if self.processed_logos:
+                self.counters["skipped_duplicate_logo"] += 1
+                self._save_rejected(cropped_visual, visual_id, rejected_folder, "duplicate_logo")
+                print(f"[ImageDetector] Skipping duplicate logo {visual_id}")
                 return None
+            else:
+                self.processed_logos.add(visual_id)
+                print(f"[ImageDetector] First logo kept: {visual_id}")
 
-            # Check if this is a component block (small labeled box inside schematic)
-            if self._is_component_block(cropped_visual):
-                self.counters["component_blocks_filtered"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "component_block")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected (component block/label)")
-                return None
+        summary_text = summary + " " + json.dumps(analysis.get("data", {}))
+        if self._is_pure_table_from_text(summary_text):
+            self.counters["rejected_table_text"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "pure_table_text")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (pure table)")
+            return None
 
-            # Send to Gemini with concurrency limit
-            async with self.semaphore:
-                analysis = await self._analyze_visual_with_gemini(
-                    cropped_visual, visual_id, page_number, usage_tracker
-                )
+        page_arr = np.array(page_image.convert("RGB"))
+        if self._is_grid_table(page_arr, region['bbox']):
+            self.counters["rejected_table_cv"] += 1
+            self._save_rejected(cropped_visual, visual_id, rejected_folder, "grid_table_cv")
+            print(f"[ImageDetector] ✗ {visual_id} rejected (grid table)")
+            return None
 
-            if not analysis:
-                self.counters["rejected_gemini"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "no_analysis")
-                print(f"[ImageDetector] ✗ {visual_id} rejected (no analysis)")
-                return None
+        visual_path = doc_folder / f"{visual_id}.png"
+        try:
+            cropped_visual.save(visual_path, "PNG")
+        except Exception as e:
+            print(f"[ImageDetector] Error saving {visual_id}: {e}")
+            return None
 
-            if not analysis.get("is_valid_visual", False):
-                self.counters["rejected_gemini"] += 1
-                reason = analysis.get("reason", "Unknown")
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, f"gemini_{reason}")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected by Gemini: {reason}")
-                return None
+        bbox_percent = self._pixels_to_percent(region['bbox'], page_image.size)
 
-            # Check for UI elements
-            visual_type = (analysis.get("type") or "").lower()
-            summary = (analysis.get("summary") or "").lower()
+        visual_record = {
+            "visual_id": visual_id,
+            "page_number": page_number,
+            "bbox": bbox_percent,
+            "type": analysis.get("type"),
+            "summary": analysis.get("summary"),
+            "data": analysis.get("data", {}),
+            "tokens": {
+                "input": analysis.get("input_tokens", 0),
+                "output": analysis.get("output_tokens", 0)
+            },
+            "file_path": str(visual_path)
+        }
 
-            if self._is_ui_element(visual_type, summary):
-                self.counters["rejected_ui_element"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "ui_element")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected (UI element: {visual_type})")
-                return None
-
-            # Logo duplicate handling
-            if any(logo_key in visual_type for logo_key in ["logo", "brand_mark", "company_logo"]):
-                if self.processed_logos:
-                    self.counters["skipped_duplicate_logo"] += 1
-                    self._save_rejected(cropped_visual, visual_id,
-                                        rejected_folder, "duplicate_logo")
-                    print(f"[ImageDetector] Skipping duplicate logo {visual_id}")
-                    return None
-                else:
-                    self.processed_logos.add(visual_id)
-                    print(f"[ImageDetector] First logo kept: {visual_id}")
-
-            # Table filtering (post-Gemini)
-            summary_text = summary + " " + json.dumps(analysis.get("data", {}))
-            if self._is_pure_table_from_text(summary_text):
-                self.counters["rejected_table_text"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "pure_table_text")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected (pure table by text summary)")
-                return None
-
-            # CV gridline check
-            page_arr = np.array(page_image.convert("RGB"))
-            if self._is_grid_table(page_arr, region['bbox']):
-                self.counters["rejected_table_cv"] += 1
-                self._save_rejected(cropped_visual, visual_id,
-                                    rejected_folder, "grid_table_cv")
-                print(
-                    f"[ImageDetector] ✗ {visual_id} rejected (pure grid-like table detected by CV)")
-                return None
-
-            # Save visual file
-            visual_path = doc_folder / f"{visual_id}.png"
-            try:
-                cropped_visual.save(visual_path, "PNG")
-            except Exception as e:
-                print(f"[ImageDetector] Error saving {visual_id}: {e}")
-                return None
-
-            bbox_percent = self._pixels_to_percent(region['bbox'], page_image.size)
-
-            # Build final record
-            visual_record = {
-                "visual_id": visual_id,
-                "page_number": page_number,
-                "bbox": bbox_percent,
-                "type": analysis.get("type"),
-                "summary": analysis.get("summary"),
-                "data": analysis.get("data", {}),
-                "tokens": {
-                    "input": analysis.get("input_tokens", 0),
-                    "output": analysis.get("output_tokens", 0)
-                },
-                "file_path": str(visual_path)
-            }
-
-            self.counters["validated_visuals"] += 1
-            print(
-                f"[ImageDetector] ✓ {visual_id} validated and saved -> {visual_path.name}")
-            print(
-                f"  Type: {analysis.get('type')}, Size: {cropped_visual.width}x{cropped_visual.height}")
-            return visual_record
+        self.counters["validated_visuals"] += 1
+        print(f"[ImageDetector] ✓ {visual_id} validated -> {visual_path.name}")
+        print(f"  Type: {analysis.get('type')}, Size: {cropped_visual.width}x{cropped_visual.height}")
+        return visual_record
 
         # -----------------------
         # Component block detection
         # -----------------------
-        def _is_component_block(self, image: Image.Image) -> bool:
+    def _is_component_block(self, image: Image.Image) -> bool:
             """
             Detect if image is a component block/label box (small labeled rectangle).
             These are typically:
@@ -753,7 +727,7 @@ class ImageDetector:
         # -----------------------
         # UI element detection
         # -----------------------
-        def _is_ui_element(self, visual_type: str, summary: str) -> bool:
+    def _is_ui_element(self, visual_type: str, summary: str) -> bool:
             """
             Detect if the visual is a UI element (header, search bar, nav, etc.)
             that should not be classified as a visual.
@@ -762,7 +736,7 @@ class ImageDetector:
 
             return any(keyword in combined_text for keyword in self.UI_REJECT_KEYWORDS)
 
-        def _save_rejected(self, image: Image.Image, visual_id: str, rejected_folder: Path, reason: str):
+    def _save_rejected(self, image: Image.Image, visual_id: str, rejected_folder: Path, reason: str):
             """
             Save rejected visuals for debugging purposes.
             """
@@ -780,7 +754,7 @@ class ImageDetector:
         # -----------------------
         # OpenCV candidate detection
         # -----------------------
-        def _detect_visual_regions_cv(self, page_image: Image.Image, page_number: int) -> List[Dict]:
+    def _detect_visual_regions_cv(self, page_image: Image.Image, page_number: int) -> List[Dict]:
             """
             Detect candidate regions using edge-based & color-based methods.
             """
@@ -855,7 +829,7 @@ class ImageDetector:
         # -----------------------
         # Utility helpers
         # -----------------------
-        def _bbox_overlap(self, bbox1: List[int], bbox2: List[int]) -> float:
+    def _bbox_overlap(self, bbox1: List[int], bbox2: List[int]) -> float:
             x1_1, y1_1, x2_1, y2_1 = bbox1
             x1_2, y1_2, x2_2, y2_2 = bbox2
             x1_i = max(x1_1, x1_2)
@@ -870,7 +844,7 @@ class ImageDetector:
             union = area1 + area2 - intersection
             return intersection / union if union > 0 else 0.0
 
-        def _crop_region_pixels(self, page_image: Image.Image, bbox: List[int]) -> Image.Image:
+    def _crop_region_pixels(self, page_image: Image.Image, bbox: List[int]) -> Image.Image:
             x1, y1, x2, y2 = bbox
             padding = 10
             x1 = max(0, x1 - padding)
@@ -879,7 +853,7 @@ class ImageDetector:
             y2 = min(page_image.height, y2 + padding)
             return page_image.crop((x1, y1, x2, y2))
 
-        def _pixels_to_percent(self, bbox: List[int], page_size: Tuple[int, int]) -> List[float]:
+    def _pixels_to_percent(self, bbox: List[int], page_size: Tuple[int, int]) -> List[float]:
             width, height = page_size
             x1, y1, x2, y2 = bbox
             x1 = max(0, min(x1, width))
@@ -892,7 +866,7 @@ class ImageDetector:
         # -----------------------
         # Gemini integration
         # -----------------------
-        async def _rate_limit_async(self):
+    async def _rate_limit_async(self):
             current_time = time.time()
             time_since_last = current_time - self.last_request_time
             if time_since_last < Config.GEMINI_REQUEST_DELAY:
@@ -901,17 +875,18 @@ class ImageDetector:
             self.request_count += 1
             self.counters["total_requests"] += 1
 
-        async def _analyze_visual_with_gemini(
-            self,
-            visual_image: Image.Image,
-            visual_id: str,
-            page_number: int,
-            usage_tracker: LLMUsageTracker = None
-        ) -> Optional[Dict]:
-            await self._rate_limit_async()
+    async def _analyze_visual_with_gemini(
+        self,
+        visual_image: Image.Image,
+        visual_id: str,
+        page_number: int,
+        usage_tracker: LLMUsageTracker = None
+    ) -> Optional[Dict]:
+        """Analyze visual with Gemini using PIL Image directly."""
+        await self._rate_limit_async()
 
-            visual_types_str = ", ".join(self.VISUAL_TYPES)
-            prompt = f"""Analyze this cropped image and determine if it's a valid visual element.
+        visual_types_str = ", ".join(self.VISUAL_TYPES)
+        prompt = f"""Analyze this cropped image and determine if it's a valid visual element.
 
     Visual ID: {visual_id}
     Page: {page_number}
@@ -951,55 +926,60 @@ class ImageDetector:
     {{"is_valid_visual": true/false, "type": "...", "summary": "...", "data": {{...}}}}
     """
 
-            try:
-                if usage_tracker:
-                    usage_tracker.start_request(prompt)
+        try:
+            if usage_tracker:
+                usage_tracker.start_request(prompt)
 
-                response = self.model.generate_content([prompt, visual_image])
+            # Use PIL Image directly (no need for inline_data/Blob)
+            response = self.client.models.generate_content(
+                model=Config.GEMINI_MODEL,
+                contents=[
+                    types.Part(text=prompt),
+                    visual_image  # directly pass the PIL Image instance
+                ]
+            )
 
-                if usage_tracker:
-                    usage_tracker.end_request(response)
+            if usage_tracker:
+                usage_tracker.end_request(response)
 
-                result_text = response.text.strip()
+            result_text = response.text.strip()
 
-                # Robust JSON extraction
-                if "```" in result_text:
-                    parts = result_text.split("```")
-                    for part in parts:
-                        if part.strip().startswith("json"):
-                            result_text = part[4:].strip()
-                            break
-                        elif part.strip() and not part.strip().startswith("```"):
-                            result_text = part.strip()
-                            break
+            # Handle possible markdown code fences
+            if "```" in result_text:
+                parts = result_text.split("```")
+                for part in parts:
+                    if part.strip().startswith("json"):
+                        result_text = part[4:].strip()
+                        break
+                    elif part.strip() and not part.strip().startswith("```"):
+                        result_text = part.strip()
+                        break
 
-                result = json.loads(result_text)
+            result = json.loads(result_text)
 
-                # Attach token info
-                if hasattr(response, "usage_metadata"):
-                    result["input_tokens"] = getattr(
-                        response.usage_metadata, "prompt_token_count", 0)
-                    result["output_tokens"] = getattr(
-                        response.usage_metadata, "candidates_token_count", 0)
-                else:
-                    result["input_tokens"] = 0
-                    result["output_tokens"] = 0
+            # Attach token info
+            if hasattr(response, "usage_metadata"):
+                result["input_tokens"] = getattr(response.usage_metadata, "prompt_token_count", 0)
+                result["output_tokens"] = getattr(response.usage_metadata, "candidates_token_count", 0)
+            else:
+                result["input_tokens"] = 0
+                result["output_tokens"] = 0
 
-                return result
+            return result
 
-            except json.JSONDecodeError as e:
-                print(f"[ImageDetector] JSON parsing error for {visual_id}: {e}")
-                print(
-                    f"[ImageDetector] Raw response (truncated): {result_text[:300]}")
-                return None
-            except Exception as e:
-                print(f"[ImageDetector] Error analyzing {visual_id}: {e}")
-                return None
+        except json.JSONDecodeError as e:
+            print(f"[ImageDetector] JSON parsing error for {visual_id}: {e}")
+            print(f"[ImageDetector] Raw response (truncated): {result_text[:300]}")
+            return None
+        except Exception as e:
+            print(f"[ImageDetector] Error analyzing {visual_id}: {e}")
+            return None
+
 
         # -----------------------
         # Table detection helpers
         # -----------------------
-        def _is_pure_table_from_text(self, summary_text: str) -> bool:
+    def _is_pure_table_from_text(self, summary_text: str) -> bool:
             """
             Conservative check: if summary mentions table/grid/rows/columns WITHOUT visual keywords.
             """
@@ -1022,7 +1002,7 @@ class ImageDetector:
 
             return False
 
-        def _is_grid_table(self, page_arr: np.ndarray, bbox: List[int]) -> bool:
+    def _is_grid_table(self, page_arr: np.ndarray, bbox: List[int]) -> bool:
             """
             Detect if a bbox is a PURE table via dense, regularly spaced gridlines.
             """
@@ -1088,10 +1068,10 @@ class ImageDetector:
         # -----------------------
         # Utilities for external use
         # -----------------------
-        def reset_logo_tracking(self):
+    def reset_logo_tracking(self):
             self.processed_logos.clear()
 
-        def get_statistics(self) -> Dict:
+    def get_statistics(self) -> Dict:
             stats = {
                 "output_directory": str(self.output_dir.absolute()),
                 "rejected_directory": str(self.rejected_dir.absolute()),
@@ -1102,4 +1082,3 @@ class ImageDetector:
             }
             stats.update(self.counters)
             return stats
-            

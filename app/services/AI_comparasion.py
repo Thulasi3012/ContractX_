@@ -1,6 +1,6 @@
 """
 AI-Powered Legal Document Comparison using Gemini
-Replaces hardcoded logic with intelligent AI analysis
+Updated to use google.genai (new SDK)
 """
 import re
 import hashlib
@@ -8,12 +8,14 @@ from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from datetime import datetime
 from app.config.config import Config
 
-genai.configure(api_key=Config.GEMINI_API_KEY)
-model = genai.GenerativeModel(Config.GEMINI_MODEL)
+# Initialize Gemini client (NEW SDK)
+client = genai.Client(api_key=Config.GEMINI_API_KEY)
+model_name = Config.GEMINI_MODEL  # e.g., "gemini-1.5-pro"
 
 # ============================================================================
 # ENUMS & DATA CLASSES (Keep these as they define structure)
@@ -140,24 +142,43 @@ Analyze and return ONLY valid JSON output."""
                     doc1_json, doc2_json
                 )
             
-            # Call Gemini
+            # Build prompt
             prompt = GeminiDocumentComparator._build_prompt(doc1_str, doc2_str)
             
+            # Call Gemini using NEW SDK
             print("Calling Gemini API...")
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.GenerationConfig(
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=prompt)]
+                    )
+                ],
+                config=types.GenerateContentConfig(
                     temperature=0.1,  # Low temperature for consistency
                     top_p=0.95,
                     max_output_tokens=8192,
+                    top_k=40
                 )
             )
             
-            print(f"Gemini response received. Length: {len(response.text)} chars")
-            print(f"First 500 chars: {response.text[:500]}")
+            # Extract response text
+            response_text = ""
+            if hasattr(response, 'text'):
+                response_text = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                first_candidate = response.candidates[0]
+                if hasattr(first_candidate, 'content') and hasattr(first_candidate.content, 'parts'):
+                    response_text = "".join(
+                        part.text for part in first_candidate.content.parts if hasattr(part, 'text')
+                    )
+            
+            print(f"Gemini response received. Length: {len(response_text)} chars")
+            print(f"First 500 chars: {response_text[:500]}")
             
             # Parse AI response
-            result = GeminiDocumentComparator._parse_ai_response(response.text)
+            result = GeminiDocumentComparator._parse_ai_response(response_text)
             
             print(f"Parsed result: {len(result.get('changes', []))} changes detected")
             
@@ -296,7 +317,7 @@ Analyze and return ONLY valid JSON output."""
             },
             'changes': [c.to_dict() for c in validated_changes],
             'ai_metadata': {
-                'model': 'gemini-1.5-pro',
+                'model': model_name,
                 'timestamp': datetime.now().isoformat(),
                 'validation_passed': True
             }
@@ -375,42 +396,3 @@ def compare_documents_with_ai(doc1: Dict, doc2: Dict) -> Dict:
     """
     return GeminiDocumentComparator.compare(doc1, doc2)
 
-
-# ============================================================================
-# TESTING
-# ============================================================================
-
-if __name__ == "__main__":
-    # Test documents
-    doc1 = {
-        "contract": {
-            "clauses": [
-                {
-                    "id": "5.2",
-                    "text": "The Customer shall pay within 30 days of invoice date."
-                },
-                {
-                    "id": "7.1",
-                    "text": "The Vendor must maintain confidentiality of all customer data."
-                }
-            ]
-        }
-    }
-    
-    doc2 = {
-        "contract": {
-            "clauses": [
-                {
-                    "id": "6.1",  # Renumbered
-                    "text": "The Customer shall pay within 60 days of invoice date."  # Changed!
-                },
-                {
-                    "id": "8.1",  # Renumbered
-                    "text": "The Vendor must maintain confidentiality of all customer data."  # Same
-                }
-            ]
-        }
-    }
-    
-    result = compare_documents_with_ai(doc1, doc2)
-    print(json.dumps(result, indent=2))
